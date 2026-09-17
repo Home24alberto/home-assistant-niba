@@ -2,8 +2,6 @@ name: Preparar repositorio inicial
 
 on:
   push:
-    paths:
-      - home-assistant-niba-v2.0.0.zip
 
 permissions:
   contents: write
@@ -19,10 +17,10 @@ jobs:
       - name: Descomprimir integración
         run: |
           unzip -q home-assistant-niba-v2.0.0.zip
+          rm -rf home-assistant-niba/.github
           cp -a home-assistant-niba/. .
           rm -rf home-assistant-niba
           rm -f home-assistant-niba-v2.0.0.zip
-          rm -f .github/workflows/unpack.yml
 
       - name: Publicar archivos
         run: |
