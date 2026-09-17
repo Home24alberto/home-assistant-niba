@@ -5,6 +5,7 @@
   "config_flow": true,
   "documentation": "https://github.com/Home24alberto/home-assistant-niba",
   "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/Home24alberto/home-assistant-niba/issues",
   "requirements": [],
   "version": "2.0.0"
 }
