@@ -1,0 +1,32 @@
+{
+  "title": "Niba Energy",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Niba Energy",
+        "description": "Enter the credentials for your Niba customer account.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate Niba Energy",
+        "description": "Enter the password for {email} again.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to Niba. Please try again later.",
+      "invalid_auth": "The email address or password is incorrect.",
+      "unknown": "An unexpected error occurred. Check the Home Assistant logs."
+    },
+    "abort": {
+      "already_configured": "This Niba account is already configured.",
+      "reauth_entry_missing": "The configuration entry to reauthenticate could not be found.",
+      "reauth_successful": "The Niba account was reauthenticated successfully."
+    }
+  }
+}

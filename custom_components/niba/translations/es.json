@@ -1,0 +1,32 @@
+{
+  "title": "Niba Energía",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Conectar con Niba Energía",
+        "description": "Introduce las credenciales de tu cuenta de cliente de Niba.",
+        "data": {
+          "email": "Correo electrónico",
+          "password": "Contraseña"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Volver a autenticar Niba Energía",
+        "description": "Introduce de nuevo la contraseña de {email}.",
+        "data": {
+          "password": "Contraseña"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "No se ha podido conectar con Niba. Inténtalo de nuevo más tarde.",
+      "invalid_auth": "El correo electrónico o la contraseña no son correctos.",
+      "unknown": "Se ha producido un error inesperado. Consulta los registros de Home Assistant."
+    },
+    "abort": {
+      "already_configured": "Esta cuenta de Niba ya está configurada.",
+      "reauth_entry_missing": "No se ha encontrado la configuración que debía autenticarse de nuevo.",
+      "reauth_successful": "La cuenta de Niba se ha autenticado correctamente."
+    }
+  }
+}
