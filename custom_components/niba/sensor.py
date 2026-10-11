@@ -225,15 +225,15 @@ def get_cups_object(coordinator: NibaCoordinator) -> dict:
 
 
 def current_period_days(coordinator: NibaCoordinator) -> int | None:
-    """Days in current period; Niba end_at is an exclusive boundary."""
+    """Return inclusive calendar days in the current billing window."""
     consumption = get_consumption(coordinator)
     start = parse_date(consumption.get("start_at"))
     end = parse_date(consumption.get("end_at"))
 
-    if start is None or end is None or end <= start:
+    if start is None or end is None or end < start:
         return None
 
-    return (end - start).days
+    return (end - start).days + 1
 
 
 def current_data_days(coordinator: NibaCoordinator) -> int | None:
@@ -269,7 +269,7 @@ def current_data_days(coordinator: NibaCoordinator) -> int | None:
             if start is not None and curve_date < start:
                 continue
 
-            if end is not None and curve_date >= end:
+            if end is not None and curve_date > end:
                 continue
 
             curve_dates.add(curve_date)
@@ -277,13 +277,8 @@ def current_data_days(coordinator: NibaCoordinator) -> int | None:
     if curve_dates:
         return len(curve_dates)
 
-    # Fallback for a temporary failure of the optional daily endpoint.
-    last_data = parse_date(consumption.get("date_last_data"))
-
-    if start is None or last_data is None or last_data < start:
-        return None
-
-    return (last_data - start).days + 1
+    # Do not fabricate published days when the daily endpoint has no curves.
+    return 0
 
 
 def bill_days(bill: dict) -> int | None:
@@ -353,6 +348,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         NibaCostPeriodSensor(coordinator),
         NibaEstimatedConsumptionSensor(coordinator),
         NibaEstimatedCostSensor(coordinator),
+        NibaApiEstimatedCostSensor(coordinator),
         NibaBalanceSensor(coordinator),
         NibaPendingBalanceSensor(coordinator),
         NibaTotalLoadedSensor(coordinator),
@@ -927,7 +923,7 @@ class NibaConsumptionPeriodSensor(NibaBaseSensor):
         return {
             "cups": data.get("cups_electricity"),
             "inicio_periodo": data.get("start_at"),
-            "fin_periodo_exclusivo": data.get("end_at"),
+            "fin_periodo_inclusivo": data.get("end_at"),
             "ultimo_dato": data.get("date_last_data"),
             "dias_periodo": current_period_days(self.coordinator),
             "dias_con_datos": current_data_days(self.coordinator),
@@ -965,7 +961,7 @@ class NibaCostPeriodSensor(NibaBaseSensor):
     @property
     def extra_state_attributes(self):
         return {
-            "tipo": "Término de energía proporcionado por Niba",
+            "tipo": "Energía calculada de las curvas si hay tarifa configurada",
             "incluye_total_factura": False,
         }
 
@@ -992,7 +988,7 @@ class NibaEstimatedCostSensor(NibaBaseSensor):
     def __init__(self, coordinator):
         super().__init__(
             coordinator,
-            "Niba Coste energía estimado",
+            "Niba Factura estimada",
             "niba_estimated_cost",
         )
         self._attr_native_unit_of_measurement = CURRENCY_EURO
@@ -1000,17 +996,42 @@ class NibaEstimatedCostSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return amount_value(
-            get_consumption(self.coordinator).get(
-                "estimated_consumption_amount"
-            )
-        )
+        return self.coordinator.data.get("invoice_estimate", {}).get("total_eur")
 
     @property
     def extra_state_attributes(self):
+        return self.coordinator.data.get("invoice_estimate", {})
+
+
+class NibaApiEstimatedCostSensor(NibaBaseSensor):
+    """Expose Niba's original energy-only estimate for diagnostics."""
+
+    def __init__(self, coordinator):
+        super().__init__(
+            coordinator,
+            "Niba Estimación energía API",
+            "niba_estimated_cost_api",
+            entity_category=EntityCategory.DIAGNOSTIC,
+        )
+        self._attr_native_unit_of_measurement = CURRENCY_EURO
+        self._attr_device_class = SensorDeviceClass.MONETARY
+
+    @property
+    def native_value(self):
+        raw = self.coordinator.data.get("consumption_api", {})
+        return amount_value(raw.get("estimated_consumption_amount"))
+
+    @property
+    def extra_state_attributes(self):
+        raw = self.coordinator.data.get("consumption_api", {})
         return {
-            "tipo": "Estimación del término de energía de Niba",
             "incluye_total_factura": False,
+            "inicio_api": raw.get("start_at"),
+            "fin_api": raw.get("end_at"),
+            "ultimo_dato_api": raw.get("date_last_data"),
+            "consumo_api_kwh": raw.get("consumption_value"),
+            "coste_api_eur": amount_value(raw.get("consumption_amount")),
+            "consumo_estimado_api_kwh": raw.get("estimated_consumption_value"),
         }
 
 
@@ -1055,7 +1076,9 @@ class NibaCurrentAverageConsumptionSensor(NibaBaseSensor):
         return {
             "dias_con_datos": current_data_days(self.coordinator),
             "hasta_fecha": latest.get("date"),
-            "fecha_resumen_api": data.get("date_last_data"),
+            "fecha_resumen_api": self.coordinator.data.get(
+                "consumption_api", {}
+            ).get("date_last_data"),
             "media_api": data.get("average_value"),
             "metodo": "consumo_periodo / días con curvas disponibles",
         }
@@ -1089,7 +1112,9 @@ class NibaCurrentAverageCostSensor(NibaBaseSensor):
         return {
             "dias_con_datos": current_data_days(self.coordinator),
             "hasta_fecha": latest.get("date"),
-            "fecha_resumen_api": data.get("date_last_data"),
+            "fecha_resumen_api": self.coordinator.data.get(
+                "consumption_api", {}
+            ).get("date_last_data"),
             "media_api": amount_value(data.get("average_amount")),
             "metodo": "coste_energia_periodo / días con curvas disponibles",
         }

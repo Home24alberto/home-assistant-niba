@@ -28,5 +28,39 @@
       "reauth_entry_missing": "No se ha encontrado la configuración que debía autenticarse de nuevo.",
       "reauth_successful": "La cuenta de Niba se ha autenticado correctamente."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Previsión de factura",
+        "description": "Datos de tu contrato. Los precios deben introducirse sin impuestos y en €/kWh o €/kW·día.",
+        "data": {
+          "invoice_estimate_enabled": "Activar previsión completa de factura",
+          "energy_punta": "Energía punta (€/kWh)",
+          "energy_llano": "Energía llano (€/kWh)",
+          "energy_valle": "Energía valle (€/kWh)",
+          "power_p1_kw": "Potencia contratada P1 (kW)",
+          "power_p2_kw": "Potencia contratada P2 (kW)",
+          "power_p1_day": "Precio potencia P1 (€/kW·día)",
+          "power_p2_day": "Precio potencia P2 (€/kW·día)",
+          "surplus_kwh": "Compensación de excedentes (€/kWh)"
+        }
+      },
+      "charges": {
+        "title": "Impuestos y otros conceptos",
+        "description": "Introduce porcentajes como 21 o 5,11269. Los festivos nacionales valle son opcionales y se separan con comas: AAAA-MM-DD,AAAA-MM-DD.",
+        "data": {
+          "rental_day": "Alquiler de contador (€/día)",
+          "social_day": "Financiación bono social (€/día)",
+          "electricity_tax_percent": "Impuesto eléctrico (%)",
+          "vat_percent": "IVA (%)",
+          "valley_dates": "Festivos nacionales valle"
+        }
+      }
+    },
+    "error": {
+      "invalid_tariff": "Completa con valores mayores que cero los precios de energía, potencia y potencias contratadas.",
+      "invalid_date_list": "Usa fechas válidas con formato AAAA-MM-DD separadas por comas."
+    }
   }
 }

@@ -19,9 +19,67 @@ from .api import (
     NibaApiError,
     NibaAuthenticationError,
 )
-from .const import UPDATE_INTERVAL
+from .billing import as_date, consumption_summary, estimate, month_bounds
+from .const import (
+    CONF_ELECTRICITY_TAX,
+    CONF_ENERGY_LLANO,
+    CONF_ENERGY_PUNTA,
+    CONF_ENERGY_VALLE,
+    CONF_INVOICE_ESTIMATE,
+    CONF_POWER_P1_DAY,
+    CONF_POWER_P1_KW,
+    CONF_POWER_P2_DAY,
+    CONF_POWER_P2_KW,
+    CONF_RENTAL_DAY,
+    CONF_SOCIAL_DAY,
+    CONF_SURPLUS_KWH,
+    CONF_VALLEY_DATES,
+    CONF_VAT,
+    UPDATE_INTERVAL,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _billing_settings(options: dict) -> dict | None:
+    """Build calculator settings exclusively from this user's options."""
+    if not options.get(CONF_INVOICE_ESTIMATE, False):
+        return None
+    try:
+        settings = {
+            "energy_kwh": {
+                "punta": float(options[CONF_ENERGY_PUNTA]),
+                "llano": float(options[CONF_ENERGY_LLANO]),
+                "valle": float(options[CONF_ENERGY_VALLE]),
+            },
+            "power_p1_kw": float(options[CONF_POWER_P1_KW]),
+            "power_p2_kw": float(options[CONF_POWER_P2_KW]),
+            "power_p1_day": float(options[CONF_POWER_P1_DAY]),
+            "power_p2_day": float(options[CONF_POWER_P2_DAY]),
+            "surplus_kwh": float(options.get(CONF_SURPLUS_KWH, 0)),
+            "rental_day": float(options.get(CONF_RENTAL_DAY, 0)),
+            "social_day": float(options.get(CONF_SOCIAL_DAY, 0)),
+            "electricity_tax": (
+                float(options.get(CONF_ELECTRICITY_TAX, 0)) / 100
+            ),
+            "vat": float(options.get(CONF_VAT, 0)) / 100,
+            "valley_dates": {
+                item.strip()
+                for item in str(options.get(CONF_VALLEY_DATES, "")).split(",")
+                if item.strip()
+            },
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    required = (
+        *settings["energy_kwh"].values(),
+        settings["power_p1_kw"],
+        settings["power_p2_kw"],
+        settings["power_p1_day"],
+        settings["power_p2_day"],
+    )
+    return settings if all(value > 0 for value in required) else None
 
 
 class NibaCoordinator(DataUpdateCoordinator):
@@ -50,6 +108,7 @@ class NibaCoordinator(DataUpdateCoordinator):
         self._last_consumption: dict = {}
         self._last_daily: list = []
         self._last_bills: list = []
+        self._daily_month: tuple[str, str] | None = None
 
         # Histórico persistente de periodos devueltos por
         # consumption-period. No equivale al histórico de facturas.
@@ -251,33 +310,14 @@ class NibaCoordinator(DataUpdateCoordinator):
             # RANGO DE FECHAS
             # -------------------------------------------------
             today = dt_util.now().date()
-
-            period_start_raw = consumption.get("start_at")
-            last_data_raw = consumption.get("date_last_data")
-
-            try:
-                period_start = (
-                    date.fromisoformat(period_start_raw)
-                    if period_start_raw
-                    else today - timedelta(days=31)
-                )
-            except (TypeError, ValueError):
-                period_start = today - timedelta(days=31)
-
-            try:
-                last_data = (
-                    date.fromisoformat(last_data_raw)
-                    if last_data_raw
-                    else today
-                )
-            except (TypeError, ValueError):
-                last_data = today
-
-            if last_data > today:
-                last_data = today
-
-            if period_start > last_data:
-                period_start = last_data - timedelta(days=31)
+            period_start, period_end = month_bounds(
+                today, self.contract.get("start_at")
+            )
+            last_data = min(today, period_end)
+            month_key = (cups, period_start.isoformat())
+            if month_key != self._daily_month:
+                self._last_daily = []
+                self._daily_month = month_key
 
             # Para histórico mensual consultamos desde
             # el inicio del año.
@@ -312,9 +352,18 @@ class NibaCoordinator(DataUpdateCoordinator):
             else:
                 daily_consumption = self._last_daily
 
-            consumption_daily = {
-                "daily_consumption": daily_consumption
-            }
+            # Never mix delayed/cached curves from another month or an open day.
+            daily_consumption = [
+                row
+                for row in daily_consumption
+                if isinstance(row, dict)
+                and as_date(row.get("date")) is not None
+                and period_start
+                <= as_date(row.get("date"))
+                <= min(period_end, today - timedelta(days=1))
+            ]
+            self._last_daily = daily_consumption
+            consumption_daily = {"daily_consumption": daily_consumption}
 
             # -------------------------------------------------
             # HISTÓRICO DE PERIODOS DE CONSUMO API
@@ -504,6 +553,59 @@ class NibaCoordinator(DataUpdateCoordinator):
                             }
                         )
 
+            # -------------------------------------------------
+            # RESUMEN COHERENTE Y PREVISIÓN DE FACTURA OPCIONAL
+            # -------------------------------------------------
+            consumption_api = consumption
+            summary = consumption_summary(
+                daily_consumption,
+                period_start,
+                period_end,
+                today,
+            )
+            settings = _billing_settings(dict(self.entry.options))
+            if settings is None:
+                invoice_estimate = {
+                    **summary,
+                    "configurado": False,
+                    "incluye_total_factura": True,
+                    "provisional": True,
+                    "motivo": (
+                        "Configura tus precios y potencias en las opciones "
+                        "de la integración"
+                    ),
+                }
+            else:
+                invoice_estimate = estimate(
+                    daily_consumption,
+                    period_start,
+                    period_end,
+                    today,
+                    settings,
+                    latest_bill,
+                )
+
+            # Period, measured days and consumption all use the same curves.
+            consumption = dict(consumption_api)
+            consumption.update(
+                {
+                    "start_at": period_start.isoformat(),
+                    "end_at": period_end.isoformat(),
+                    "date_last_data": summary.get("hasta_fecha"),
+                    "consumption_value": summary.get("consumo_medido_kwh"),
+                    "estimated_consumption_value": summary.get(
+                        "consumo_estimado_kwh"
+                    ),
+                }
+            )
+            if settings is not None:
+                consumption["consumption_amount"] = invoice_estimate.get(
+                    "coste_energia_medido_eur"
+                )
+                consumption["estimated_consumption_amount"] = (
+                    invoice_estimate.get("energia_eur")
+                )
+
             _LOGGER.debug(
                 "Niba actualizado. daily=%s, monthly=%s, bills=%s",
                 len(daily_consumption),
@@ -523,6 +625,8 @@ class NibaCoordinator(DataUpdateCoordinator):
                 "contract": self.contract,
                 "cups": cups,
                 "consumption": consumption,
+                "consumption_api": consumption_api,
+                "invoice_estimate": invoice_estimate,
                 "consumption_daily": consumption_daily,
                 "balances": balances,
                 "user": user,
