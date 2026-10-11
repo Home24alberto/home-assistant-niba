@@ -17,6 +17,8 @@ en la cuenta de cliente de **Niba Energía**.
 - Saldo, movimientos y batería solar de Niba.
 - Contrato, producto, precios, potencia contratada y datos técnicos.
 - Última factura y desglose de sus principales conceptos.
+- Periodo mensual calculado con días inclusivos y curvas diarias coherentes.
+- Previsión completa opcional configurada con los precios de cada usuario.
 - Reautenticación desde Home Assistant si caduca la sesión.
 
 La disponibilidad de cada entidad depende de los servicios contratados y de los
@@ -43,6 +45,18 @@ Mientras el repositorio no figure en el catálogo general de HACS:
 
 La integración detectará el contrato y el CUPS automáticamente. Solo se admite
 una cuenta de Niba por instalación de Home Assistant.
+
+### Previsión completa de factura
+
+En la integración, abre **Configurar** para introducir tus precios de energía,
+potencias contratadas, compensación, impuestos y otros conceptos. No se incluye
+ninguna tarifa personal en el repositorio y la previsión permanece desactivada
+hasta que cada usuario complete sus propios datos.
+
+La cifra es provisional: utiliza las curvas cerradas disponibles, proyecta el
+resto del mes y no incluye wallet, servicios adicionales ni regularizaciones.
+Los festivos nacionales valle se pueden indicar como fechas ISO separadas por
+comas. Deben revisarse cuando cambien el contrato, los impuestos o el calendario.
 
 ## Actualizaciones
 
