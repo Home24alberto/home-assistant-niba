@@ -28,5 +28,39 @@
       "reauth_entry_missing": "The configuration entry to reauthenticate could not be found.",
       "reauth_successful": "The Niba account was reauthenticated successfully."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Invoice forecast",
+        "description": "Your contract data. Enter prices before tax in €/kWh or €/kW·day.",
+        "data": {
+          "invoice_estimate_enabled": "Enable full invoice forecast",
+          "energy_punta": "Peak energy (€/kWh)",
+          "energy_llano": "Shoulder energy (€/kWh)",
+          "energy_valle": "Off-peak energy (€/kWh)",
+          "power_p1_kw": "Contracted power P1 (kW)",
+          "power_p2_kw": "Contracted power P2 (kW)",
+          "power_p1_day": "Power P1 price (€/kW·day)",
+          "power_p2_day": "Power P2 price (€/kW·day)",
+          "surplus_kwh": "Export compensation (€/kWh)"
+        }
+      },
+      "charges": {
+        "title": "Taxes and other charges",
+        "description": "Enter percentages as 21 or 5.11269. Optional national off-peak holidays must be comma-separated: YYYY-MM-DD,YYYY-MM-DD.",
+        "data": {
+          "rental_day": "Meter rental (€/day)",
+          "social_day": "Social-bonus contribution (€/day)",
+          "electricity_tax_percent": "Electricity tax (%)",
+          "vat_percent": "VAT (%)",
+          "valley_dates": "National off-peak holidays"
+        }
+      }
+    },
+    "error": {
+      "invalid_tariff": "Enter values above zero for energy prices, power prices and contracted powers.",
+      "invalid_date_list": "Use valid comma-separated dates in YYYY-MM-DD format."
+    }
   }
 }
