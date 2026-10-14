@@ -34,6 +34,22 @@ resumen de Niba; **Niba Consumo diario** y las entidades de curvas reflejan
 únicamente las fechas recibidas en la respuesta diaria. Si Niba publica menos
 días, las fechas ausentes no se rellenan ni se estiman como lecturas reales.
 
+Para interpretar los sensores sin mezclar fuentes ni fechas:
+
+| Sensor | Dato que representa |
+| --- | --- |
+| **Niba Consumo periodo** | Suma de las curvas diarias disponibles; los atributos indican hasta qué fecha llegan. |
+| **Niba Consumo periodo API** | Consumo acumulado comunicado por el resumen de Niba y su última fecha de actualización. |
+| **Niba Consumo estimado** | Proyección de kWh calculada con las curvas diarias cerradas disponibles. |
+| **Niba Consumo estimado API** | Proyección de kWh comunicada por Niba. |
+| **Niba Coste energía periodo** | Coste de energía que devuelve Niba; no es el total de la factura. |
+| **Niba Estimación energía API** | Coste de energía estimado por Niba; no incluye necesariamente potencia, impuestos u otros conceptos. |
+| **Niba Consumo mensual** | Dato del endpoint mensual de Niba, independiente del resumen del periodo y de las curvas. |
+
+En un panel, empareja el coste con los sensores de consumo **API** y muestra
+aparte la suma o proyección de curvas, junto con su fecha. Así no se comparan
+por error periodos distintos cuando las curvas llegan con retraso.
+
 Cuando una consulta de curvas falla temporalmente, se conserva en memoria la
 última respuesta válida del periodo y los atributos de diagnóstico indican si
 se están mostrando datos en caché. Reiniciar Home Assistant borra esa caché

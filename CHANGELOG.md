@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.5
+
+- Include the credentials-only config flow so setup no longer asks users to enter tariff prices.
+- Add source and date attributes to distinguish curve-based projections from Niba API summaries and energy-cost estimates.
+- Preserve existing sensor entity IDs and state calculations; do not report a full invoice total when Niba does not provide one.
+
+
 ## 2.0.4
 
 - Prevent stale API totals and costs from carrying into a new billing period
