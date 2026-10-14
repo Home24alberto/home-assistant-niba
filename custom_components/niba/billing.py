@@ -5,6 +5,7 @@ from __future__ import annotations
 from calendar import monthrange
 from datetime import date, timedelta
 from math import isfinite
+import unicodedata
 
 
 def numeric(value):
@@ -35,6 +36,81 @@ def period_matches(data, start, end):
         and as_date(data.get("start_at")) == start
         and as_date(data.get("end_at")) == end
     )
+
+
+def contract_tariff(contract, products):
+    """Return API prices for the exact product attached to a contract.
+
+    Product catalog entries are matched by their stable ID/code. We never
+    select the first catalog item or guess a tariff from its description.
+    """
+    contract_product = contract.get("product") if isinstance(contract, dict) else None
+    if not isinstance(contract_product, dict):
+        return {"estado": "producto_contrato_no_disponible"}
+
+    code = contract_product.get("code") or contract_product.get("id")
+    if not isinstance(code, str) or not code:
+        return {"estado": "codigo_producto_no_disponible"}
+
+    product = next(
+        (
+            item
+            for item in products
+            if isinstance(item, dict)
+            and code.casefold()
+            in {
+                str(item.get("id") or "").casefold(),
+                str(item.get("code") or "").casefold(),
+            }
+        ),
+        None,
+    ) if isinstance(products, list) else None
+
+    if product is None:
+        return {"estado": "producto_no_encontrado", "codigo": code}
+
+    result = {
+        "estado": "disponible",
+        "codigo": code,
+        "nombre": product.get("name"),
+        "energia_punta_eur_kwh": None,
+        "energia_llano_eur_kwh": None,
+        "energia_valle_eur_kwh": None,
+        "potencia_punta_eur_kw_dia": None,
+        "potencia_valle_eur_kw_dia": None,
+        "excedentes_eur_kwh": None,
+    }
+
+    field_map = {
+        ("energia", "punta"): "energia_punta_eur_kwh",
+        ("energia", "llano"): "energia_llano_eur_kwh",
+        ("energia", "valle"): "energia_valle_eur_kwh",
+        ("potencia", "punta"): "potencia_punta_eur_kw_dia",
+        ("potencia", "valle"): "potencia_valle_eur_kw_dia",
+    }
+
+    def normalized(value):
+        value = unicodedata.normalize("NFKD", str(value or "").casefold())
+        return "".join(char for char in value if not unicodedata.combining(char))
+
+    prices = product.get("prices")
+    if isinstance(prices, list):
+        for item in prices:
+            if not isinstance(item, dict):
+                continue
+            group = normalized(item.get("group"))
+            label = normalized(item.get("label"))
+            key = field_map.get((group, label))
+            amount = numeric(item.get("value"))
+            if key and amount is not None:
+                result[key] = amount
+
+    solar = product.get("solar_prices")
+    fixed = solar.get("fixed_price") if isinstance(solar, dict) else None
+    if isinstance(fixed, dict):
+        result["excedentes_eur_kwh"] = numeric(fixed.get("value"))
+
+    return result
 
 
 def month_bounds(today, contract_start=None):

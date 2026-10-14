@@ -9,11 +9,6 @@ from .coordinator import NibaCoordinator
 PLATFORMS = ["sensor"]
 
 
-async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload Niba when tariff options change."""
-    await hass.config_entries.async_reload(entry.entry_id)
-
-
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
@@ -22,7 +17,6 @@ async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
 ) -> bool:
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     coordinator = NibaCoordinator(hass, entry)
 
     await coordinator.async_config_entry_first_refresh()

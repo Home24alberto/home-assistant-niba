@@ -950,14 +950,20 @@ class NibaConsumptionPeriodSensor(NibaBaseSensor):
             "ultimo_dato": data.get("date_last_data"),
             "dias_periodo": current_period_days(self.coordinator),
             "dias_con_datos": current_data_days(self.coordinator),
-            "coste_energia_periodo_eur": amount_value(
-                data.get("consumption_amount")
+            # This monetary value belongs to Niba's summary endpoint, whose
+            # cutoff can be newer than the daily curves above.
+            "coste_energia_resumen_api_eur": amount_value(
+                self.coordinator.data.get("consumption_api", {}).get(
+                    "consumption_amount"
+                )
             ),
             "consumo_medio_api_kwh": data.get("average_value"),
             "coste_medio_api_eur": amount_value(data.get("average_amount")),
             "consumo_estimado_kwh": data.get("estimated_consumption_value"),
-            "coste_energia_estimado_eur": amount_value(
-                data.get("estimated_consumption_amount")
+            "coste_energia_estimado_api_eur": amount_value(
+                self.coordinator.data.get("consumption_api", {}).get(
+                    "estimated_consumption_amount"
+                )
             ),
             "comparacion_periodo_anterior_api": data.get(
                 "previous_period_comparison"
@@ -994,16 +1000,22 @@ class NibaCostPeriodSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
+        raw = self.coordinator.data.get("consumption_api", {})
+        if not isinstance(raw, dict):
+            return None
         return amount_value(
-            get_consumption(self.coordinator).get("consumption_amount")
+            raw.get("consumption_amount")
         )
 
     @property
     def extra_state_attributes(self):
         raw = self.coordinator.data.get("consumption_api", {})
+        raw = raw if isinstance(raw, dict) else {}
         return {
             "tipo": "Coste de energía acumulado devuelto por Niba",
-            "fecha_resumen_api": raw.get("date_last_data") if isinstance(raw, dict) else None,
+            "inicio_periodo_api": raw.get("start_at"),
+            "fin_periodo_api": raw.get("end_at"),
+            "fecha_resumen_api": raw.get("date_last_data"),
             "incluye_total_factura": False,
         }
 
@@ -1026,6 +1038,24 @@ class NibaEstimatedConsumptionSensor(NibaBaseSensor):
                 "estimated_consumption_value"
             )
         )
+
+    @property
+    def extra_state_attributes(self):
+        curves = self.coordinator.data.get("invoice_estimate", {})
+        api = self.coordinator.data.get("consumption_api", {})
+        curves = curves if isinstance(curves, dict) else {}
+        api = api if isinstance(api, dict) else {}
+        return {
+            "fuente": "Proyección a partir de curvas diarias cerradas",
+            "hasta_fecha_curvas": curves.get("hasta_fecha"),
+            "dias_con_curvas": curves.get("dias_con_datos"),
+            "dias_periodo": curves.get("dias_periodo"),
+            "metodo": curves.get("metodo"),
+            "consumo_estimado_api_kwh": number_value(
+                api.get("estimated_consumption_value")
+            ),
+            "ultimo_dato_api": api.get("date_last_data"),
+        }
 
 
 class NibaEstimatedCostSensor(NibaBaseSensor):
@@ -1062,11 +1092,22 @@ class NibaApiEstimatedCostSensor(NibaBaseSensor):
     @property
     def extra_state_attributes(self):
         raw = self.coordinator.data.get("consumption_api", {})
-        return {"incluye_total_factura": False, "inicio_api": raw.get("start_at"),
-                "fin_api": raw.get("end_at"), "ultimo_dato_api": raw.get("date_last_data"),
-                "consumo_api_kwh": raw.get("consumption_value"),
-                "coste_api_eur": amount_value(raw.get("consumption_amount")),
-                "consumo_estimado_api_kwh": raw.get("estimated_consumption_value")}
+        raw = raw if isinstance(raw, dict) else {}
+        return {
+            "fuente": "Resumen de consumo de Niba",
+            "incluye_total_factura": False,
+            "inicio_api": raw.get("start_at"),
+            "fin_api": raw.get("end_at"),
+            "ultimo_dato_api": raw.get("date_last_data"),
+            "consumo_api_kwh": number_value(raw.get("consumption_value")),
+            "coste_api_eur": amount_value(raw.get("consumption_amount")),
+            "consumo_estimado_api_kwh": number_value(
+                raw.get("estimated_consumption_value")
+            ),
+            "coste_estimado_api_eur": amount_value(
+                raw.get("estimated_consumption_amount")
+            ),
+        }
 
 
 class NibaApiConsumptionSensor(NibaBaseSensor):
@@ -2442,4 +2483,9 @@ class NibaProductsCatalogSensor(NibaBaseSensor):
                 }
             )
 
-        return {"productos": summary}
+        return {
+            "producto_contratado": self.coordinator.data.get(
+                "contract_tariff", {}
+            ),
+            "productos": summary,
+        }

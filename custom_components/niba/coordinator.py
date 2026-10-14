@@ -3,7 +3,14 @@ from __future__ import annotations
 from datetime import date, timedelta
 import logging
 
-from .billing import month_bounds, estimate, as_date, numeric, period_matches
+from .billing import (
+    month_bounds,
+    estimate,
+    as_date,
+    numeric,
+    period_matches,
+    contract_tariff,
+)
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -445,6 +452,10 @@ class NibaCoordinator(DataUpdateCoordinator):
             if not isinstance(products, list):
                 products = []
 
+            # Only use prices from the catalog entry whose ID/code exactly
+            # matches the product attached to this contract.
+            active_tariff = contract_tariff(self.contract, products)
+
             # -------------------------------------------------
             # BLOQUES AUXILIARES
             # -------------------------------------------------
@@ -591,6 +602,7 @@ class NibaCoordinator(DataUpdateCoordinator):
                 "bills": bills,
                 "latest_bill": latest_bill,
                 "products": products,
+                "contract_tariff": active_tariff,
                 "spending_rules": spending_rules,
                 "payment_cards": payment_cards,
                 "cases": cases,
