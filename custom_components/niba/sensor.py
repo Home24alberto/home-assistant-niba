@@ -18,6 +18,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import NibaCoordinator
+from .billing import numeric
 
 
 # ---------------------------------------------------------
@@ -29,23 +30,13 @@ def amount_value(value: Any) -> Any:
     if isinstance(value, list):
         value = value[0] if value else None
 
-    if isinstance(value, (int, float)):
-        return round(float(value), 2)
-
-    return value
+    parsed = numeric(value)
+    return round(parsed, 2) if parsed is not None else None
 
 
 def number_value(value: Any) -> float | None:
     """Return a numeric Niba value or None."""
-    value = amount_value(value)
-
-    if isinstance(value, (int, float)):
-        return float(value)
-
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return numeric(value)
 
 
 def nested_value(data: Any, path: tuple[Any, ...]) -> Any:
@@ -108,7 +99,17 @@ def format_address(value: Any) -> str | None:
 def bool_text(value: Any) -> str | None:
     if value is None:
         return None
-    return "Sí" if bool(value) else "No"
+    if isinstance(value, bool):
+        return "Sí" if value else "No"
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return "Sí" if value == 1 else "No"
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "si", "sí"}:
+            return "Sí"
+        if normalized in {"false", "0", "no"}:
+            return "No"
+    return None
 
 
 def bill_status_text(value: Any) -> str | None:
@@ -179,6 +180,14 @@ def get_latest_daily(coordinator: NibaCoordinator) -> dict:
     return max(valid, key=lambda item: str(item.get("date") or ""))
 
 
+def get_latest_measurements(coordinator: NibaCoordinator) -> list[dict]:
+    """Return only valid hourly measurements from the latest daily curve."""
+    measurements = get_latest_daily(coordinator).get("hour_measurements", [])
+    if not isinstance(measurements, list):
+        return []
+    return [row for row in measurements if isinstance(row, dict)]
+
+
 def get_latest_monthly(coordinator: NibaCoordinator) -> dict:
     """Return latest monthly consumption record."""
     data = coordinator.data.get("consumption_monthly", [])
@@ -225,7 +234,7 @@ def get_cups_object(coordinator: NibaCoordinator) -> dict:
 
 
 def current_period_days(coordinator: NibaCoordinator) -> int | None:
-    """Return inclusive calendar days in the current billing window."""
+    """Calendar billing window with inclusive dates."""
     consumption = get_consumption(coordinator)
     start = parse_date(consumption.get("start_at"))
     end = parse_date(consumption.get("end_at"))
@@ -277,8 +286,9 @@ def current_data_days(coordinator: NibaCoordinator) -> int | None:
     if curve_dates:
         return len(curve_dates)
 
-    # Do not fabricate published days when the daily endpoint has no curves.
+    # Missing curves are unknown; do not fabricate data days.
     return 0
+
 
 
 def bill_days(bill: dict) -> int | None:
@@ -349,6 +359,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
         NibaEstimatedConsumptionSensor(coordinator),
         NibaEstimatedCostSensor(coordinator),
         NibaApiEstimatedCostSensor(coordinator),
+        NibaApiConsumptionSensor(coordinator),
+        NibaApiConsumptionSensor(coordinator, estimated=True),
         NibaBalanceSensor(coordinator),
         NibaPendingBalanceSensor(coordinator),
         NibaTotalLoadedSensor(coordinator),
@@ -894,6 +906,15 @@ class NibaGenericSensor(NibaBaseSensor):
         if isinstance(value, (dict, list)):
             return None
 
+        # HA measured entities must not receive malformed, NaN or infinite
+        # numeric values from a partially changed API response.
+        if (
+            self._attr_native_unit_of_measurement is not None
+            or self._attr_device_class is not None
+            or self._attr_state_class is not None
+        ):
+            return number_value(value)
+
         return value
 
 
@@ -914,7 +935,9 @@ class NibaConsumptionPeriodSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return get_consumption(self.coordinator).get("consumption_value")
+        return number_value(
+            get_consumption(self.coordinator).get("consumption_value")
+        )
 
     @property
     def extra_state_attributes(self):
@@ -939,6 +962,23 @@ class NibaConsumptionPeriodSensor(NibaBaseSensor):
             "comparacion_periodo_anterior_api": data.get(
                 "previous_period_comparison"
             ),
+            "fuente_valor": "curvas_diarias",
+            "fuente_coste_periodo": "resumen API de Niba",
+            "fecha_coste_periodo_api": self.coordinator.data.get(
+                "consumption_api", {}
+            ).get("date_last_data"),
+            "fecha_resumen_api": self.coordinator.data.get(
+                "consumption_api", {}
+            ).get("date_last_data"),
+            "consumo_periodo_api_kwh": self.coordinator.data.get(
+                "consumption_api", {}
+            ).get("consumption_value"),
+            "consumo_estimado_api_kwh": self.coordinator.data.get(
+                "consumption_api", {}
+            ).get("estimated_consumption_value"),
+            "diagnostico_curvas": self.coordinator.data.get(
+                "daily_diagnostics", {}
+            ),
         }
 
 
@@ -960,8 +1000,10 @@ class NibaCostPeriodSensor(NibaBaseSensor):
 
     @property
     def extra_state_attributes(self):
+        raw = self.coordinator.data.get("consumption_api", {})
         return {
-            "tipo": "Energía calculada de las curvas si hay tarifa configurada",
+            "tipo": "Coste de energía acumulado devuelto por Niba",
+            "fecha_resumen_api": raw.get("date_last_data") if isinstance(raw, dict) else None,
             "incluye_total_factura": False,
         }
 
@@ -979,8 +1021,10 @@ class NibaEstimatedConsumptionSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return get_consumption(self.coordinator).get(
-            "estimated_consumption_value"
+        return number_value(
+            get_consumption(self.coordinator).get(
+                "estimated_consumption_value"
+            )
         )
 
 
@@ -1000,38 +1044,77 @@ class NibaEstimatedCostSensor(NibaBaseSensor):
 
     @property
     def extra_state_attributes(self):
-        return self.coordinator.data.get("invoice_estimate", {})
+        estimate = self.coordinator.data.get("invoice_estimate", {})
+        return estimate if isinstance(estimate, dict) else {}
 
 
 class NibaApiEstimatedCostSensor(NibaBaseSensor):
-    """Expose Niba's original energy-only estimate for diagnostics."""
-
     def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Estimación energía API",
-            "niba_estimated_cost_api",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
+        super().__init__(coordinator, "Niba Estimación energía API", "niba_estimated_cost_api",
+                         entity_category=EntityCategory.DIAGNOSTIC)
         self._attr_native_unit_of_measurement = CURRENCY_EURO
         self._attr_device_class = SensorDeviceClass.MONETARY
 
     @property
     def native_value(self):
-        raw = self.coordinator.data.get("consumption_api", {})
-        return amount_value(raw.get("estimated_consumption_amount"))
+        return amount_value(self.coordinator.data.get("consumption_api", {}).get("estimated_consumption_amount"))
 
     @property
     def extra_state_attributes(self):
         raw = self.coordinator.data.get("consumption_api", {})
+        return {"incluye_total_factura": False, "inicio_api": raw.get("start_at"),
+                "fin_api": raw.get("end_at"), "ultimo_dato_api": raw.get("date_last_data"),
+                "consumo_api_kwh": raw.get("consumption_value"),
+                "coste_api_eur": amount_value(raw.get("consumption_amount")),
+                "consumo_estimado_api_kwh": raw.get("estimated_consumption_value")}
+
+
+class NibaApiConsumptionSensor(NibaBaseSensor):
+    """Expose Niba's own period summary separately from curve calculations."""
+
+    def __init__(self, coordinator, *, estimated: bool = False):
+        self._estimated = estimated
+        if estimated:
+            name = "Niba Consumo estimado API"
+            unique_id = "niba_consumption_estimated_api"
+        else:
+            name = "Niba Consumo periodo API"
+            unique_id = "niba_consumption_period_api"
+        super().__init__(
+            coordinator,
+            name,
+            unique_id,
+            entity_category=EntityCategory.DIAGNOSTIC,
+        )
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_state_class = SensorStateClass.TOTAL
+
+    @property
+    def native_value(self):
+        raw = self.coordinator.data.get("consumption_api", {})
+        if not isinstance(raw, dict):
+            return None
+        key = (
+            "estimated_consumption_value"
+            if self._estimated
+            else "consumption_value"
+        )
+        return number_value(raw.get(key))
+
+    @property
+    def extra_state_attributes(self):
+        raw = self.coordinator.data.get("consumption_api", {})
+        raw = raw if isinstance(raw, dict) else {}
+        diagnostics = self.coordinator.data.get("daily_diagnostics", {})
+        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
         return {
-            "incluye_total_factura": False,
-            "inicio_api": raw.get("start_at"),
-            "fin_api": raw.get("end_at"),
+            "inicio_periodo": raw.get("start_at"),
+            "fin_periodo": raw.get("end_at"),
             "ultimo_dato_api": raw.get("date_last_data"),
-            "consumo_api_kwh": raw.get("consumption_value"),
-            "coste_api_eur": amount_value(raw.get("consumption_amount")),
-            "consumo_estimado_api_kwh": raw.get("estimated_consumption_value"),
+            "dias_curvas_disponibles": diagnostics.get("dias_disponibles"),
+            "hasta_fecha_curvas": diagnostics.get("hasta_fecha"),
+            "fuente": "endpoint consumption-period de Niba",
         }
 
 
@@ -1076,9 +1159,7 @@ class NibaCurrentAverageConsumptionSensor(NibaBaseSensor):
         return {
             "dias_con_datos": current_data_days(self.coordinator),
             "hasta_fecha": latest.get("date"),
-            "fecha_resumen_api": self.coordinator.data.get(
-                "consumption_api", {}
-            ).get("date_last_data"),
+            "fecha_resumen_api": self.coordinator.data.get("consumption_api", {}).get("date_last_data"),
             "media_api": data.get("average_value"),
             "metodo": "consumo_periodo / días con curvas disponibles",
         }
@@ -1096,27 +1177,18 @@ class NibaCurrentAverageCostSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        data = get_consumption(self.coordinator)
-        value = number_value(data.get("consumption_amount"))
-        days = current_data_days(self.coordinator)
-
-        if value is None or not days:
+        raw = self.coordinator.data.get("consumption_api", {})
+        if not isinstance(raw, dict):
             return None
-
-        return round(value / days, 2)
+        return amount_value(raw.get("average_amount"))
 
     @property
     def extra_state_attributes(self):
-        data = get_consumption(self.coordinator)
-        latest = get_latest_daily(self.coordinator)
+        raw = self.coordinator.data.get("consumption_api", {})
+        raw = raw if isinstance(raw, dict) else {}
         return {
-            "dias_con_datos": current_data_days(self.coordinator),
-            "hasta_fecha": latest.get("date"),
-            "fecha_resumen_api": self.coordinator.data.get(
-                "consumption_api", {}
-            ).get("date_last_data"),
-            "media_api": amount_value(data.get("average_amount")),
-            "metodo": "coste_energia_periodo / días con curvas disponibles",
+            "fecha_resumen_api": raw.get("date_last_data"),
+            "metodo": "Valor medio diario devuelto por Niba",
         }
 
 
@@ -1190,7 +1262,9 @@ class NibaPreviousPeriodConsumptionSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return get_latest_bill(self.coordinator).get("act_total_consumption")
+        return number_value(
+            get_latest_bill(self.coordinator).get("act_total_consumption")
+        )
 
 
 class NibaPreviousPeriodCostSensor(NibaBaseSensor):
@@ -1515,7 +1589,9 @@ class NibaDailyConsumptionSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return get_latest_daily(self.coordinator).get("total_active_value")
+        return number_value(
+            get_latest_daily(self.coordinator).get("total_active_value")
+        )
 
     @property
     def extra_state_attributes(self):
@@ -1565,7 +1641,9 @@ class NibaGridImportSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return get_latest_daily(self.coordinator).get("total_active_value")
+        return number_value(
+            get_latest_daily(self.coordinator).get("total_active_value")
+        )
 
     @property
     def extra_state_attributes(self):
@@ -1578,8 +1656,7 @@ class NibaGridImportSensor(NibaBaseSensor):
                     "hora": row.get("hour"),
                     "kwh": row.get("active_value"),
                 }
-                for row in latest.get("hour_measurements", [])
-                if isinstance(row, dict)
+                for row in get_latest_measurements(self.coordinator)
             ],
         }
 
@@ -1597,7 +1674,9 @@ class NibaGridExportSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return get_latest_daily(self.coordinator).get("total_out_active_value")
+        return number_value(
+            get_latest_daily(self.coordinator).get("total_out_active_value")
+        )
 
     @property
     def extra_state_attributes(self):
@@ -1610,8 +1689,7 @@ class NibaGridExportSensor(NibaBaseSensor):
                     "hora": row.get("hour"),
                     "kwh": row.get("out_active_value"),
                 }
-                for row in latest.get("hour_measurements", [])
-                if isinstance(row, dict)
+                for row in get_latest_measurements(self.coordinator)
             ],
         }
 
@@ -1629,7 +1707,9 @@ class NibaDailyReactiveSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return get_latest_daily(self.coordinator).get("total_reactive_value")
+        return number_value(
+            get_latest_daily(self.coordinator).get("total_reactive_value")
+        )
 
 
 class NibaDailyCostSensor(NibaBaseSensor):
@@ -1669,17 +1749,14 @@ class NibaHourlyProfileSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        measurements = get_latest_daily(self.coordinator).get(
-            "hour_measurements", []
-        )
-        return len(measurements) if isinstance(measurements, list) else 0
+        return len(get_latest_measurements(self.coordinator))
 
     @property
     def extra_state_attributes(self):
         latest = get_latest_daily(self.coordinator)
         return {
             "fecha": latest.get("date"),
-            "medidas": latest.get("hour_measurements", []),
+            "medidas": get_latest_measurements(self.coordinator),
         }
 
 
@@ -1708,13 +1785,7 @@ class NibaLatestEnergyHourSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        measurements = get_latest_daily(self.coordinator).get(
-            "hour_measurements", []
-        )
-
-        if not isinstance(measurements, list):
-            return None
-
+        measurements = get_latest_measurements(self.coordinator)
         valid = [
             row
             for row in measurements
@@ -1740,13 +1811,7 @@ class NibaLatestHourImportSensor(NibaBaseSensor):
         self._attr_state_class = SensorStateClass.TOTAL
 
     def _latest_measurement(self):
-        measurements = get_latest_daily(self.coordinator).get(
-            "hour_measurements", []
-        )
-
-        if not isinstance(measurements, list):
-            return {}
-
+        measurements = get_latest_measurements(self.coordinator)
         valid = [
             row
             for row in measurements
@@ -1757,7 +1822,7 @@ class NibaLatestHourImportSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return self._latest_measurement().get("active_value")
+        return number_value(self._latest_measurement().get("active_value"))
 
     @property
     def extra_state_attributes(self):
@@ -1778,13 +1843,7 @@ class NibaLatestHourExportSensor(NibaBaseSensor):
         self._attr_state_class = SensorStateClass.TOTAL
 
     def _latest_measurement(self):
-        measurements = get_latest_daily(self.coordinator).get(
-            "hour_measurements", []
-        )
-
-        if not isinstance(measurements, list):
-            return {}
-
+        measurements = get_latest_measurements(self.coordinator)
         valid = [
             row
             for row in measurements
@@ -1795,7 +1854,7 @@ class NibaLatestHourExportSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return self._latest_measurement().get("out_active_value")
+        return number_value(self._latest_measurement().get("out_active_value"))
 
     @property
     def extra_state_attributes(self):
@@ -1821,7 +1880,9 @@ class NibaMonthlyConsumptionValueSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return get_latest_monthly(self.coordinator).get("consumption_value")
+        return number_value(
+            get_latest_monthly(self.coordinator).get("consumption_value")
+        )
 
     @property
     def extra_state_attributes(self):
@@ -1847,8 +1908,10 @@ class NibaMonthlyEstimatedConsumptionSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return get_latest_monthly(self.coordinator).get(
-            "estimated_consumption_value"
+        return number_value(
+            get_latest_monthly(self.coordinator).get(
+                "estimated_consumption_value"
+            )
         )
 
 
@@ -1866,7 +1929,8 @@ class NibaMonthlyAverageDailySensor(NibaBaseSensor):
     @property
     def native_value(self):
         value = get_latest_monthly(self.coordinator).get("consumption_day_avg")
-        return round(float(value), 2) if isinstance(value, (int, float)) else value
+        value = number_value(value)
+        return round(value, 2) if value is not None else None
 
     @property
     def extra_state_attributes(self):
@@ -1891,8 +1955,10 @@ class NibaMonthlySelfConsumptionSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return get_latest_monthly(self.coordinator).get(
-            "self_consumption_energy"
+        return number_value(
+            get_latest_monthly(self.coordinator).get(
+                "self_consumption_energy"
+            )
         )
 
 
@@ -1986,9 +2052,12 @@ class NibaUserFieldSensor(NibaBaseSensor):
         if not isinstance(user, dict):
             return {}
 
-        document = user.get("document") or {}
-        phone = user.get("phone") or {}
-        datadis = user.get("datadis") or {}
+        document = user.get("document")
+        phone = user.get("phone")
+        datadis = user.get("datadis")
+        document = document if isinstance(document, dict) else {}
+        phone = phone if isinstance(phone, dict) else {}
+        datadis = datadis if isinstance(datadis, dict) else {}
 
         return {
             "document_type": document.get("type"),
@@ -2038,13 +2107,16 @@ class NibaDatadisSensor(NibaBaseSensor):
         user = self.coordinator.data.get("user", {})
         if not isinstance(user, dict):
             return None
-        datadis = user.get("datadis") or {}
+        datadis = user.get("datadis")
+        if not isinstance(datadis, dict):
+            return None
         return datadis.get("status")
 
     @property
     def extra_state_attributes(self):
         user = self.coordinator.data.get("user", {})
-        datadis = user.get("datadis") or {} if isinstance(user, dict) else {}
+        datadis = user.get("datadis") if isinstance(user, dict) else {}
+        datadis = datadis if isinstance(datadis, dict) else {}
         return {"fecha": datadis.get("date"), "cups": datadis.get("cups")}
 
 
@@ -2169,7 +2241,7 @@ class NibaPowerContractedSensor(NibaBaseSensor):
 
     @property
     def native_value(self):
-        return self._power().get("value")
+        return number_value(self._power().get("value"))
 
     @property
     def extra_state_attributes(self):

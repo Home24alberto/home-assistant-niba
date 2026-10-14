@@ -31,6 +31,40 @@ class NibaApiClient:
         self._email = email
         self._password = password
         self._token: str | None = None
+        # Safe, short-lived diagnostics for the most recent optional request.
+        # Never store/log the full path: it can contain the customer's CUPS.
+        self.last_optional_error: dict[str, Any] | None = None
+
+    @staticmethod
+    def _endpoint_name(path: str) -> str:
+        """Return a non-sensitive endpoint label for diagnostics."""
+        parts = path.strip("/").split("/")
+        known_endpoints = {
+            "me",
+            "contracts",
+            "products",
+            "bills",
+            "balances",
+            "movements",
+            "consumption-period",
+            "consumption-daily",
+            "consumption-monthly",
+            "consumption-powers",
+            "appliances-consumption",
+            "spending-rules",
+            "payment-cards",
+            "cases",
+            "sva-assistances",
+            "invitations",
+        }
+        endpoint = parts[-1] if parts else ""
+        if endpoint in known_endpoints:
+            return endpoint
+        if "cups" in parts:
+            return "cups-info"
+        if "documents" in parts:
+            return "document"
+        return "api"
 
     async def async_login(self) -> str:
         """Authenticate and return token."""
@@ -64,16 +98,18 @@ class NibaApiClient:
 
         except aiohttp.ClientError as err:
             raise NibaApiError("No se pudo conectar con Niba") from err
+        except TimeoutError as err:
+            raise NibaApiError("Tiempo de espera agotado al iniciar sesión en Niba") from err
 
-        token = data.get("token")
+        token = data.get("token") if isinstance(data, dict) else None
 
-        if not token:
+        if not isinstance(token, str) or not token.strip():
             raise NibaAuthenticationError(
                 "Niba no devolvió token"
             )
 
-        self._token = token
-        return token
+        self._token = token.strip()
+        return self._token
 
     async def async_request(
         self,
@@ -84,6 +120,8 @@ class NibaApiClient:
         optional: bool = False,
     ) -> Any:
         """Perform authenticated API request."""
+
+        endpoint = self._endpoint_name(path)
 
         if not self._token:
             await self.async_login()
@@ -118,8 +156,14 @@ class NibaApiClient:
 
                     if response.status != 200:
                         if optional:
+                            self.last_optional_error = {
+                                "endpoint": endpoint,
+                                "tipo": "http",
+                                "http_status": response.status,
+                            }
                             _LOGGER.debug(
-                                "Endpoint opcional Niba devolvió HTTP %s",
+                                "Endpoint opcional Niba '%s': HTTP %s",
+                                endpoint,
                                 response.status,
                             )
                             return None
@@ -129,11 +173,16 @@ class NibaApiClient:
                         )
 
                     try:
-                        return await response.json()
-                    except Exception as err:
+                        data = await response.json()
+                    except (aiohttp.ContentTypeError, ValueError) as err:
                         if optional:
+                            self.last_optional_error = {
+                                "endpoint": endpoint,
+                                "tipo": "json_invalido",
+                            }
                             _LOGGER.debug(
-                                "JSON inválido en un endpoint opcional de Niba",
+                                "Endpoint opcional Niba '%s': JSON no válido",
+                                endpoint,
                             )
                             return None
 
@@ -141,16 +190,36 @@ class NibaApiClient:
                             "La API de Niba devolvió una respuesta no válida"
                         ) from err
 
+                    if optional:
+                        self.last_optional_error = None
+                    return data
+
             except aiohttp.ClientError as err:
                 if optional:
+                    self.last_optional_error = {
+                        "endpoint": endpoint,
+                        "tipo": "conexion",
+                    }
                     _LOGGER.debug(
-                        "Error de red en endpoint opcional %s: %s",
-                        path,
-                        err,
+                        "Error de conexión en endpoint opcional Niba '%s' (%s)",
+                        endpoint,
+                        type(err).__name__,
                     )
                     return None
 
                 raise NibaApiError("Error de conexión con Niba") from err
+            except TimeoutError as err:
+                if optional:
+                    self.last_optional_error = {
+                        "endpoint": endpoint,
+                        "tipo": "timeout",
+                    }
+                    _LOGGER.debug(
+                        "Timeout en endpoint opcional Niba '%s'",
+                        endpoint,
+                    )
+                    return None
+                raise NibaApiError("Tiempo de espera agotado al conectar con Niba") from err
 
         if optional:
             return None
