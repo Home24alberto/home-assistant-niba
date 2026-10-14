@@ -1,91 +1,68 @@
 # Niba Energía para Home Assistant
 
 Integración comunitaria de Home Assistant para consultar los datos disponibles
-en la cuenta de cliente de **Niba Energía**.
-
-> [!IMPORTANT]
-> Este proyecto no es oficial y no está afiliado, respaldado ni mantenido por
-> Niba Energía. Utiliza una API privada que puede cambiar sin previo aviso.
+en una cuenta de Niba Energía. No es oficial ni está afiliada a Niba. La API
+utilizada no es pública y puede cambiar sin previo aviso.
 
 ## Funciones
 
-- Configuración desde la interfaz con correo electrónico y contraseña.
-- Actualización automática cada 15 minutos.
-- Consumo del periodo actual, estimaciones y comparación con el periodo anterior.
-- Consumo diario, importación, exportación y perfil horario disponible.
-- Datos mensuales, potencia y autoconsumo disponibles en la cuenta.
-- Saldo, movimientos y batería solar de Niba.
-- Contrato, producto, precios, potencia contratada y datos técnicos.
-- Última factura y desglose de sus principales conceptos.
-- Periodo mensual calculado con días inclusivos y curvas diarias coherentes.
-- Previsión completa opcional configurada con los precios de cada usuario.
-- Reautenticación desde Home Assistant si caduca la sesión.
+- Configuración desde **Ajustes → Dispositivos y servicios**.
+- Actualización periódica de contrato, consumo, curvas, facturas y otros datos
+  que Niba ofrezca para la cuenta.
+- Reautenticación desde Home Assistant cuando caducan las credenciales.
+- Entidades de diagnóstico para distinguir el resumen del periodo y las curvas
+  diarias.
 
-La disponibilidad de cada entidad depende de los servicios contratados y de los
-datos que la API devuelva para cada cuenta.
+La disponibilidad de cada dato depende de Niba y de la cuenta. La integración
+no genera lecturas que la API no haya publicado.
 
 ## Instalación con HACS
 
-Mientras el repositorio no figure en el catálogo general de HACS:
-
-1. Abre **HACS** en Home Assistant.
-2. Entra en **Integraciones**.
-3. Abre el menú y selecciona **Repositorios personalizados**.
-4. Añade `https://github.com/Home24alberto/home-assistant-niba` como categoría
+1. En HACS, abre **Integraciones → ⋮ → Repositorios personalizados**.
+2. Añade `https://github.com/Home24alberto/home-assistant-niba` con categoría
    **Integración**.
-5. Busca **Niba Energía** e instálala.
-6. Reinicia Home Assistant.
+3. Instala **Niba Energía** y reinicia Home Assistant.
+4. Ve a **Ajustes → Dispositivos y servicios → Añadir integración**, busca
+   **Niba Energía** e inicia sesión.
 
-## Configuración
+## Datos de consumo
 
-1. Abre **Ajustes → Dispositivos y servicios**.
-2. Pulsa **Añadir integración**.
-3. Busca **Niba Energía**.
-4. Introduce el correo electrónico y la contraseña de tu cuenta de cliente.
+Niba ofrece un resumen del periodo y, por separado, curvas diarias. El resumen
+puede indicar una fecha posterior a la última curva disponible. La integración
+conserva esa diferencia: las entidades terminadas en **API** muestran el
+resumen de Niba; **Niba Consumo diario** y las entidades de curvas reflejan
+únicamente las fechas recibidas en la respuesta diaria. Si Niba publica menos
+días, las fechas ausentes no se rellenan ni se estiman como lecturas reales.
 
-La integración detectará el contrato y el CUPS automáticamente. Solo se admite
-una cuenta de Niba por instalación de Home Assistant.
+Cuando una consulta de curvas falla temporalmente, se conserva en memoria la
+última respuesta válida del periodo y los atributos de diagnóstico indican si
+se están mostrando datos en caché. Reiniciar Home Assistant borra esa caché
+temporal; Niba debe volver a publicar las curvas para recuperarlas.
 
-### Previsión completa de factura
+## Costes y previsiones
 
-En la integración, abre **Configurar** para introducir tus precios de energía,
-potencias contratadas, compensación, impuestos y otros conceptos. No se incluye
-ninguna tarifa personal en el repositorio y la previsión permanece desactivada
-hasta que cada usuario complete sus propios datos.
+No hay que introducir una tarifa para usar la integración. El sensor **Niba
+Estimación energía API** muestra el coste estimado que devuelve Niba al iniciar
+sesión. Ese importe corresponde al coste de energía indicado por la API; no se
+presenta como total de factura cuando no incluye potencia, impuestos u otros
+conceptos.
 
-La cifra es provisional: utiliza las curvas cerradas disponibles, proyecta el
-resto del mes y no incluye wallet, servicios adicionales ni regularizaciones.
-Los festivos nacionales valle se pueden indicar como fechas ISO separadas por
-comas. Deben revisarse cuando cambien el contrato, los impuestos o el calendario.
+La previsión de consumo en kWh se calcula con la media de curvas diarias
+cerradas recibidas. Es una proyección orientativa, no una lectura real ni una
+previsión completa del importe de la factura. El total definitivo lo establece
+Niba en la factura oficial.
 
-## Actualizaciones
+## Privacidad y soporte
 
-HACS avisará cuando exista una versión nueva. Tras actualizar los archivos,
-reinicia Home Assistant para cargar la nueva versión.
+Las credenciales se guardan en la entrada de configuración de Home Assistant y
+se envían a los servidores de Niba para autenticar la cuenta. No publiques
+registros o diagnósticos sin retirar correo, CUPS, identificadores y cualquier
+otro dato personal.
 
-## Privacidad
+Para incidencias, actualiza la integración y reinicia Home Assistant antes de
+abrir un [issue en GitHub](https://github.com/Home24alberto/home-assistant-niba/issues).
+Incluye la versión de Home Assistant y de la integración, el error relevante y
+los nombres de endpoint/estado HTTP si aparecen; nunca incluyas credenciales,
+tokens ni CUPS.
 
-- El repositorio no contiene credenciales, tokens, CUPS ni datos de clientes.
-- Las credenciales introducidas se guardan en la entrada de configuración de
-  Home Assistant y se envían únicamente a los servidores de Niba para iniciar
-  sesión.
-- Algunas entidades de diagnóstico pueden mostrar información personal del
-  contrato dentro de tu propio Home Assistant.
-- No publiques registros, diagnósticos o capturas sin revisar antes sus datos.
-
-## Solución de problemas
-
-Antes de abrir una incidencia:
-
-1. Comprueba que puedes entrar con las mismas credenciales en el área de cliente
-   o aplicación oficial de Niba.
-2. Actualiza la integración desde HACS.
-3. Reinicia Home Assistant.
-4. Revisa **Ajustes → Sistema → Registros**.
-
-Las incidencias se pueden comunicar en
-[GitHub Issues](https://github.com/Home24alberto/home-assistant-niba/issues).
-
-## Licencia
-
-Distribuido bajo la licencia [MIT](LICENSE).
+Licencia: [MIT](LICENSE).
