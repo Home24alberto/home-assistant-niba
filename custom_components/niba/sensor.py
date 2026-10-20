@@ -14,50 +14,68 @@ from homeassistant.const import (
     UnitOfEnergy,
     UnitOfPower,
 )
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .billing import numeric
 from .const import DOMAIN
 from .coordinator import NibaCoordinator
-from .billing import numeric
+
+ENERGY = SensorDeviceClass.ENERGY
+MONEY = SensorDeviceClass.MONETARY
+POWER = SensorDeviceClass.POWER
+TOTAL = SensorStateClass.TOTAL
+MEASUREMENT = SensorStateClass.MEASUREMENT
+DIAGNOSTIC = EntityCategory.DIAGNOSTIC
+KWH = UnitOfEnergy.KILO_WATT_HOUR
+KW = UnitOfPower.KILO_WATT
+
+# Entidades retiradas de las versiones anteriores.
+# Solo se eliminan de la entrada de configuración de Niba actual.
+RETIRED_UNIQUE_IDS = frozenset(
+    {
+        "niba_usuario_nombre",
+        "niba_usuario_apellidos",
+        "niba_usuario_estado",
+        "niba_usuario_email",
+        "niba_usuario_codigo_miembro",
+        "niba_usuario_email_validado",
+        "niba_contrato_numero",
+        "niba_contrato_cups",
+        "niba_contrato_direccion",
+        "niba_movements",
+        "niba_sva_assistances",
+        "niba_cases",
+        "niba_products_catalog",
+        "niba_cau",
+        "niba_self_consumption_code",
+        "niba_appliances_consumption_data",
+        "niba_cups_technical_code",
+        "niba_datadis_status",
+        "niba_documents",
+        "niba_invitations",
+        "niba_consumption_powers_data",
+        "niba_consumption_monthly_data",
+        "niba_spending_rules",
+        "niba_payment_cards",
+    }
+)
 
 
 # ---------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------
 
-def amount_value(value: Any) -> Any:
-    """Extract and normalize amount from Niba [value, currency]."""
+def number_value(value: Any) -> float | None:
+    return numeric(value)
+
+
+def amount_value(value: Any) -> float | None:
     if isinstance(value, list):
         value = value[0] if value else None
 
     parsed = numeric(value)
     return round(parsed, 2) if parsed is not None else None
-
-
-def number_value(value: Any) -> float | None:
-    """Return a numeric Niba value or None."""
-    return numeric(value)
-
-
-def nested_value(data: Any, path: tuple[Any, ...]) -> Any:
-    """Read a nested value safely."""
-    current = data
-
-    for key in path:
-        if isinstance(key, int):
-            if not isinstance(current, list):
-                return None
-            if len(current) <= key:
-                return None
-            current = current[key]
-            continue
-
-        if not isinstance(current, dict):
-            return None
-
-        current = current.get(key)
-
-    return current
 
 
 def parse_date(value: Any) -> date | None:
@@ -70,771 +88,544 @@ def parse_date(value: Any) -> date | None:
         return None
 
 
-def format_address(value: Any) -> str | None:
-    if not isinstance(value, dict):
-        return None
-
-    street = value.get("street") or ""
-    number = value.get("street_number") or ""
-    postal = value.get("postal") or ""
-    city = value.get("city") or ""
-    province = value.get("province") or ""
-
-    parts = []
-
-    first = f"{street} {number}".strip()
-    if first:
-        parts.append(first)
-
-    second = f"{postal} {city}".strip()
-    if second:
-        parts.append(second)
-
-    if province:
-        parts.append(province)
-
-    return ", ".join(parts) or None
-
-
-def bool_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return "Sí" if value else "No"
-    if isinstance(value, (int, float)) and value in (0, 1):
-        return "Sí" if value == 1 else "No"
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"true", "1", "yes", "si", "sí"}:
-            return "Sí"
-        if normalized in {"false", "0", "no"}:
-            return "No"
-    return None
-
-
-def bill_status_text(value: Any) -> str | None:
-    statuses = {
-        "PENDING": "Pendiente",
-        "PAID": "Pagada",
-        "PAYMENT_PENDING": "Pendiente de pago",
-        "CANCELLED": "Anulada",
-    }
-
-    if value is None:
-        return None
-
-    return statuses.get(str(value).upper(), str(value))
-
-
-def get_consumption(coordinator: NibaCoordinator) -> dict:
-    value = coordinator.data.get("consumption", {})
+def mapping(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def get_latest_bill(coordinator: NibaCoordinator) -> dict:
-    value = coordinator.data.get("latest_bill", {})
+def rows(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        return []
 
-    if isinstance(value, dict) and value:
-        return value
+    return [
+        item
+        for item in value
+        if isinstance(item, dict)
+    ]
 
-    bills = coordinator.data.get("bills", [])
 
-    if not isinstance(bills, list):
-        return {}
+def block(coordinator: NibaCoordinator, key: str) -> dict:
+    return mapping(mapping(coordinator.data).get(key))
 
-    valid = [bill for bill in bills if isinstance(bill, dict)]
 
-    if not valid:
-        return {}
+def consumption(coordinator: NibaCoordinator) -> dict:
+    return block(coordinator, "consumption")
 
-    return max(
-        valid,
-        key=lambda bill: (
-            str(bill.get("end_at") or ""),
-            str(bill.get("contab_date") or ""),
-            str(bill.get("id") or ""),
-        ),
+
+def api_consumption(coordinator: NibaCoordinator) -> dict:
+    return block(coordinator, "consumption_api")
+
+
+def curve_estimate(coordinator: NibaCoordinator) -> dict:
+    return block(coordinator, "invoice_estimate")
+
+
+def daily_rows(coordinator: NibaCoordinator) -> list[dict]:
+    data = block(coordinator, "consumption_daily")
+
+    return sorted(
+        rows(data.get("daily_consumption")),
+        key=lambda row: str(row.get("date") or ""),
     )
 
 
-def get_latest_daily(coordinator: NibaCoordinator) -> dict:
-    data = coordinator.data.get("consumption_daily", {})
-
-    if not isinstance(data, dict):
-        return {}
-
-    daily = data.get("daily_consumption", [])
-
-    if not isinstance(daily, list):
-        return {}
-
+def latest_daily(coordinator: NibaCoordinator) -> dict:
     valid = [
-        item
-        for item in daily
-        if isinstance(item, dict) and item.get("date")
+        row
+        for row in daily_rows(coordinator)
+        if row.get("date")
     ]
 
-    if not valid:
-        return {}
-
-    return max(valid, key=lambda item: str(item.get("date") or ""))
+    return valid[-1] if valid else {}
 
 
-def get_latest_measurements(coordinator: NibaCoordinator) -> list[dict]:
-    """Return only valid hourly measurements from the latest daily curve."""
-    measurements = get_latest_daily(coordinator).get("hour_measurements", [])
-    if not isinstance(measurements, list):
-        return []
-    return [row for row in measurements if isinstance(row, dict)]
+def measurements(coordinator: NibaCoordinator) -> list[dict]:
+    return rows(
+        latest_daily(coordinator).get("hour_measurements")
+    )
 
 
-def get_latest_monthly(coordinator: NibaCoordinator) -> dict:
-    """Return latest monthly consumption record."""
-    data = coordinator.data.get("consumption_monthly", [])
+def latest_hour(coordinator: NibaCoordinator) -> dict:
+    valid = [
+        row
+        for row in measurements(coordinator)
+        if row.get("hour") is not None
+    ]
 
-    if isinstance(data, list):
-        valid = [item for item in data if isinstance(item, dict)]
+    def hour_key(row):
+        value = row.get("hour")
 
-        if not valid:
-            return {}
+        if isinstance(value, (int, float)):
+            return f"{int(value):02d}:00"
 
-        return max(
-            valid,
-            key=lambda item: str(item.get("date") or ""),
-        )
+        text = str(value)
+
+        if text.isdigit():
+            return f"{int(text):02d}:00"
+
+        return text.zfill(5)
+
+    return max(valid, key=hour_key) if valid else {}
+
+
+def latest_monthly(coordinator: NibaCoordinator) -> dict:
+    data = mapping(coordinator.data).get("consumption_monthly")
 
     if isinstance(data, dict):
         return data
 
-    return {}
+    valid = rows(data)
+
+    return max(
+        valid,
+        key=lambda row: str(row.get("date") or ""),
+    ) if valid else {}
 
 
-def get_contract_v2(coordinator: NibaCoordinator) -> dict:
-    value = coordinator.data.get("contracts_v2", [])
+def latest_bill(coordinator: NibaCoordinator) -> dict:
+    bill = block(coordinator, "latest_bill")
 
-    if isinstance(value, list) and value:
-        if isinstance(value[0], dict):
-            return value[0]
+    if bill:
+        return bill
 
-    return {}
+    valid = rows(mapping(coordinator.data).get("bills"))
 
-
-def get_cups_object(coordinator: NibaCoordinator) -> dict:
-    info = coordinator.data.get("cups_info", {})
-
-    if not isinstance(info, dict):
-        return {}
-
-    cups = info.get("cups")
-
-    if isinstance(cups, dict):
-        return cups
-
-    return info
+    return max(
+        valid,
+        key=lambda row: (
+            str(row.get("end_at") or ""),
+            str(row.get("contab_date") or ""),
+        ),
+    ) if valid else {}
 
 
-def current_period_days(coordinator: NibaCoordinator) -> int | None:
-    """Calendar billing window with inclusive dates."""
-    consumption = get_consumption(coordinator)
-    start = parse_date(consumption.get("start_at"))
-    end = parse_date(consumption.get("end_at"))
-
-    if start is None or end is None or end < start:
-        return None
-
-    return (end - start).days + 1
+def contract(coordinator: NibaCoordinator) -> dict:
+    return block(coordinator, "contract")
 
 
-def current_data_days(coordinator: NibaCoordinator) -> int | None:
-    """Return the number of distinct daily curves in the current period.
-
-    Niba's consumption-period ``date_last_data`` can advance before the
-    corresponding daily curves are published.  Counting the actual records
-    avoids understating the daily averages and overstating period progress.
-    """
-    consumption = get_consumption(coordinator)
-    start = parse_date(consumption.get("start_at"))
-    end = parse_date(consumption.get("end_at"))
-
-    daily_data = coordinator.data.get("consumption_daily", {})
-    daily = (
-        daily_data.get("daily_consumption", [])
-        if isinstance(daily_data, dict)
-        else []
+def product(coordinator: NibaCoordinator) -> dict:
+    contracts = rows(
+        mapping(coordinator.data).get("contracts_v2")
     )
 
-    curve_dates: set[date] = set()
+    if contracts:
+        return mapping(contracts[0].get("product"))
 
-    if isinstance(daily, list):
-        for item in daily:
-            if not isinstance(item, dict):
-                continue
-
-            curve_date = parse_date(item.get("date"))
-
-            if curve_date is None:
-                continue
-
-            if start is not None and curve_date < start:
-                continue
-
-            if end is not None and curve_date > end:
-                continue
-
-            curve_dates.add(curve_date)
-
-    if curve_dates:
-        return len(curve_dates)
-
-    # Missing curves are unknown; do not fabricate data days.
-    return 0
+    return mapping(contract(coordinator).get("product"))
 
 
+def self_consumption(coordinator: NibaCoordinator) -> dict:
+    return mapping(
+        product(coordinator).get("self_consumption")
+    )
 
-def bill_days(bill: dict) -> int | None:
-    """Days in an issued bill; both invoice dates are inclusive."""
-    start = parse_date(bill.get("start_at"))
-    end = parse_date(bill.get("end_at"))
+
+def technical(coordinator: NibaCoordinator) -> dict:
+    return block(coordinator, "cups_info")
+
+
+def contracted_power(
+    coordinator: NibaCoordinator,
+    key: str,
+) -> dict:
+    return next(
+        (
+            row
+            for row in rows(product(coordinator).get("powers"))
+            if row.get("key") == key
+        ),
+        {},
+    )
+
+
+def inclusive_days(data: dict) -> int | None:
+    start = parse_date(data.get("start_at"))
+    end = parse_date(data.get("end_at"))
 
     if start is None or end is None or end < start:
         return None
 
     return (end - start).days + 1
+
+
+def period_days(coordinator: NibaCoordinator) -> int | None:
+    return inclusive_days(consumption(coordinator))
+
+
+def data_days(coordinator: NibaCoordinator) -> int:
+    data = consumption(coordinator)
+    start = parse_date(data.get("start_at"))
+    end = parse_date(data.get("end_at"))
+    dates = set()
+
+    for row in daily_rows(coordinator):
+        day = parse_date(row.get("date"))
+
+        if day is None:
+            continue
+
+        if start is not None and day < start:
+            continue
+
+        if end is not None and day > end:
+            continue
+
+        dates.add(day)
+
+    return len(dates)
+
+
+def status_text(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    return {
+        "PENDING": "Pendiente",
+        "PAID": "Pagada",
+        "PAYMENT_PENDING": "Pendiente de pago",
+        "CANCELLED": "Anulada",
+    }.get(str(value).upper(), str(value))
+
+
+def bill_taxes(bill: dict) -> float | None:
+    vat = amount_value(bill.get("tax_amount"))
+    electricity = amount_value(bill.get("nm_amount_ie"))
+
+    if vat is None or electricity is None:
+        return None
+
+    return round(vat + electricity, 2)
 
 
 def bill_social_charge(bill: dict) -> float | None:
-    """Derive the social-bonus financing charge from invoice totals."""
-    base = number_value(bill.get("base_amount"))
-    energy = number_value(bill.get("nm_term_ener"))
-    power = number_value(bill.get("term_power"))
-    discount = number_value(bill.get("self_consumption_discount"))
-    electricity_tax = number_value(bill.get("nm_amount_ie"))
-    rental = number_value(bill.get("nm_rental_amount"))
-
-    values = (
-        base,
-        energy,
-        power,
-        discount,
-        electricity_tax,
-        rental,
-    )
+    values = [
+        amount_value(bill.get(key))
+        for key in (
+            "base_amount",
+            "nm_term_ener",
+            "term_power",
+            "self_consumption_discount",
+            "nm_amount_ie",
+            "nm_rental_amount",
+        )
+    ]
 
     if any(value is None for value in values):
         return None
 
+    base, energy, power, discount, tax, rental = values
+
     return round(
-        base - (
-            energy
-            + power
-            + discount
-            + electricity_tax
-            + rental
-        ),
+        base - energy - power - discount - tax - rental,
         2,
     )
 
 
-def bill_total_taxes(bill: dict) -> float | None:
-    vat = number_value(bill.get("tax_amount"))
-    electricity_tax = number_value(bill.get("nm_amount_ie"))
+def bill_period(coordinator: NibaCoordinator) -> str | None:
+    bill = latest_bill(coordinator)
+    start = bill.get("start_at")
+    end = bill.get("end_at")
 
-    if vat is None or electricity_tax is None:
-        return None
-
-    return round(vat + electricity_tax, 2)
+    return f"{start} → {end}" if start and end else None
 
 
 # ---------------------------------------------------------
-# SETUP
+# ATRIBUTOS SELECCIONADOS
 # ---------------------------------------------------------
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    coordinator: NibaCoordinator = hass.data[DOMAIN][entry.entry_id]
+def bill_attributes(coordinator: NibaCoordinator) -> dict:
+    bill = latest_bill(coordinator)
 
-    entities: list[SensorEntity] = [
-        # Entidades existentes: se conservan todos sus unique_id.
-        NibaConsumptionPeriodSensor(coordinator),
-        NibaCostPeriodSensor(coordinator),
-        NibaEstimatedConsumptionSensor(coordinator),
-        NibaEstimatedCostSensor(coordinator),
-        NibaApiEstimatedCostSensor(coordinator),
-        NibaApiConsumptionSensor(coordinator),
-        NibaApiConsumptionSensor(coordinator, estimated=True),
-        NibaBalanceSensor(coordinator),
-        NibaPendingBalanceSensor(coordinator),
-        NibaTotalLoadedSensor(coordinator),
-        NibaTotalSpentSensor(coordinator),
-        NibaSolarBatterySensor(coordinator),
-        NibaDailyConsumptionSensor(coordinator),
-        NibaGridImportSensor(coordinator),
-        NibaGridExportSensor(coordinator),
+    if not bill:
+        return {}
 
-        NibaUserFieldSensor(
-            coordinator, "Niba Usuario nombre", "niba_usuario_nombre", "name"
+    return {
+        "fecha_emision": bill.get("contab_date"),
+        "inicio": bill.get("start_at"),
+        "fin": bill.get("end_at"),
+        "dias": inclusive_days(bill),
+        "estado": status_text(bill.get("status")),
+        "consumo_kwh": number_value(
+            bill.get("act_total_consumption")
         ),
-        NibaUserFieldSensor(
-            coordinator,
-            "Niba Usuario apellidos",
-            "niba_usuario_apellidos",
-            "last_name",
+        "total_eur": amount_value(bill.get("total_amount")),
+        "energia_eur": amount_value(bill.get("nm_term_ener")),
+        "potencia_eur": amount_value(bill.get("term_power")),
+        "excedentes_facturados_kwh": number_value(
+            bill.get("self_consumption_surplus")
         ),
-        NibaUserFieldSensor(
-            coordinator, "Niba Usuario estado", "niba_usuario_estado", "status"
+        "excedentes_medidos_kwh": number_value(
+            bill.get("total_surplus")
         ),
-        NibaUserFieldSensor(
-            coordinator, "Niba Usuario email", "niba_usuario_email", "email"
+        "compensacion_eur": amount_value(
+            bill.get("self_consumption_discount")
         ),
-        NibaUserFieldSensor(
-            coordinator,
-            "Niba Usuario código de miembro",
-            "niba_usuario_codigo_miembro",
-            "member_code",
+        "alquiler_eur": amount_value(
+            bill.get("nm_rental_amount")
         ),
-        NibaUserEmailValidatedSensor(coordinator),
+        "financiacion_bono_social_eur": bill_social_charge(bill),
+        "impuesto_electrico_eur": amount_value(
+            bill.get("nm_amount_ie")
+        ),
+        "iva_eur": amount_value(bill.get("tax_amount")),
+        "impuestos_totales_eur": bill_taxes(bill),
+        "base_iva_eur": amount_value(bill.get("base_amount")),
+        "potencia_contratada_p1_kw": number_value(
+            bill.get("contract_pwr_p1")
+        ),
+        "potencia_contratada_p2_kw": number_value(
+            bill.get("contract_pwr_p2")
+        ),
+    }
 
-        NibaContractFieldSensor(
-            coordinator,
-            "Niba Contrato número",
-            "niba_contrato_numero",
-            ("contract_number",),
-        ),
-        NibaContractFieldSensor(
-            coordinator,
-            "Niba Contrato CUPS",
-            "niba_contrato_cups",
-            ("cups",),
-        ),
-        NibaContractProductSensor(coordinator),
-        NibaContractFieldSensor(
-            coordinator,
-            "Niba Contrato estado",
-            "niba_contrato_estado",
-            ("status",),
-        ),
-        NibaContractFieldSensor(
-            coordinator,
-            "Niba Contrato inicio",
-            "niba_contrato_inicio",
-            ("start_at",),
-        ),
-        NibaContractFieldSensor(
-            coordinator,
-            "Niba Contrato fin",
-            "niba_contrato_fin",
-            ("end_at",),
-        ),
-        NibaContractAddressSensor(coordinator),
 
-        # Periodo actual y comparativa con la factura real anterior.
-        NibaCurrentAverageConsumptionSensor(coordinator),
-        NibaCurrentAverageCostSensor(coordinator),
-        NibaPeriodFieldSensor(
-            coordinator,
-            "Niba Último dato",
-            "niba_last_data",
-            ("date_last_data",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaPeriodFieldSensor(
-            coordinator,
-            "Niba Inicio periodo",
-            "niba_period_start",
-            ("start_at",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaPeriodFieldSensor(
-            coordinator,
-            "Niba Fin periodo",
-            "niba_period_end",
-            ("end_at",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaPreviousPeriodConsumptionSensor(coordinator),
-        NibaPreviousPeriodCostSensor(coordinator),
-        NibaProjectionVsPreviousSensor(coordinator),
-        NibaPreviousPeriodInfoSensor(coordinator),
-        NibaPeriodFieldSensor(
-            coordinator,
-            "Niba Comparación periodo anterior API",
-            "niba_previous_period_comparison",
-            ("previous_period_comparison",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaPeriodTotalDaysSensor(coordinator),
-        NibaPeriodDataDaysSensor(coordinator),
-        NibaPeriodProgressSensor(coordinator),
+def api_attributes(coordinator: NibaCoordinator) -> dict:
+    data = api_consumption(coordinator)
 
-        # Última factura emitida por Niba.
-        NibaLatestBillTotalSensor(coordinator),
-        NibaLatestBillPeriodSensor(coordinator),
-        NibaLatestBillFieldSensor(
-            coordinator,
-            "Niba Última factura consumo",
-            "niba_latest_bill_consumption",
-            ("act_total_consumption",),
-            unit=UnitOfEnergy.KILO_WATT_HOUR,
-            device_class=SensorDeviceClass.ENERGY,
+    return {
+        "fuente": "Resumen de consumo de Niba",
+        "inicio_periodo": data.get("start_at"),
+        "fin_periodo": data.get("end_at"),
+        "ultimo_dato_api": data.get("date_last_data"),
+        "consumo_api_kwh": number_value(
+            data.get("consumption_value")
         ),
-        NibaLatestBillFieldSensor(
-            coordinator,
-            "Niba Última factura energía",
-            "niba_latest_bill_energy",
-            ("nm_term_ener",),
-            unit=CURRENCY_EURO,
-            device_class=SensorDeviceClass.MONETARY,
-            transform=amount_value,
+        "coste_api_eur": amount_value(
+            data.get("consumption_amount")
         ),
-        NibaLatestBillFieldSensor(
-            coordinator,
-            "Niba Última factura potencia",
-            "niba_latest_bill_power",
-            ("term_power",),
-            unit=CURRENCY_EURO,
-            device_class=SensorDeviceClass.MONETARY,
-            transform=amount_value,
+        "consumo_estimado_api_kwh": number_value(
+            data.get("estimated_consumption_value")
         ),
-        NibaLatestBillFieldSensor(
-            coordinator,
-            "Niba Última factura excedentes facturados",
-            "niba_latest_bill_surplus",
-            ("self_consumption_surplus",),
-            unit=UnitOfEnergy.KILO_WATT_HOUR,
-            device_class=SensorDeviceClass.ENERGY,
+        "coste_estimado_api_eur": amount_value(
+            data.get("estimated_consumption_amount")
         ),
-        NibaLatestBillFieldSensor(
-            coordinator,
-            "Niba Última factura compensación",
-            "niba_latest_bill_discount",
-            ("self_consumption_discount",),
-            unit=CURRENCY_EURO,
-            device_class=SensorDeviceClass.MONETARY,
-            transform=amount_value,
-        ),
-        NibaLatestBillFieldSensor(
-            coordinator,
-            "Niba Última factura alquiler",
-            "niba_latest_bill_rental",
-            ("nm_rental_amount",),
-            unit=CURRENCY_EURO,
-            device_class=SensorDeviceClass.MONETARY,
-            transform=amount_value,
-        ),
-        NibaLatestBillFieldSensor(
-            coordinator,
-            "Niba Última factura impuesto eléctrico",
-            "niba_latest_bill_electricity_tax",
-            ("nm_amount_ie",),
-            unit=CURRENCY_EURO,
-            device_class=SensorDeviceClass.MONETARY,
-            transform=amount_value,
-        ),
-        NibaLatestBillFieldSensor(
-            coordinator,
-            "Niba Última factura IVA",
-            "niba_latest_bill_vat",
-            ("tax_amount",),
-            unit=CURRENCY_EURO,
-            device_class=SensorDeviceClass.MONETARY,
-            transform=amount_value,
-        ),
-        NibaLatestBillTaxesSensor(coordinator),
-        NibaLatestBillSocialChargeSensor(coordinator),
-        NibaLatestBillStatusSensor(coordinator),
+        "incluye_total_factura": False,
+    }
 
-        # Energía diaria y horaria.
-        NibaDailyReactiveSensor(coordinator),
-        NibaDailyCostSensor(coordinator),
-        NibaHourlyProfileSensor(coordinator),
-        NibaLatestEnergyDateSensor(coordinator),
-        NibaLatestEnergyHourSensor(coordinator),
-        NibaLatestHourImportSensor(coordinator),
-        NibaLatestHourExportSensor(coordinator),
-        NibaMonthlyConsumptionValueSensor(coordinator),
-        NibaMonthlyEstimatedConsumptionSensor(coordinator),
-        NibaMonthlyAverageDailySensor(coordinator),
-        NibaMonthlySelfConsumptionSensor(coordinator),
 
-        # Contrato y producto.
-        NibaContractV2Sensor(
-            coordinator,
-            "Niba Producto código",
-            "niba_product_code",
-            ("product", "code"),
-        ),
-        NibaContractV2Sensor(
-            coordinator,
-            "Niba Producto nombre",
-            "niba_product_name",
-            ("product", "name"),
-        ),
-        NibaContractV2Sensor(
-            coordinator,
-            "Niba Producto descripción",
-            "niba_product_description",
-            ("product", "description"),
-        ),
-        NibaContractV2Sensor(
-            coordinator,
-            "Niba Producto familia",
-            "niba_product_family",
-            ("product", "family"),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaContractV2Sensor(
-            coordinator,
-            "Niba Tarifa ATR",
-            "niba_atr_tariff",
-            ("product", "atr_tariff"),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaPowerContractedSensor(
-            coordinator, "P1", "Niba Potencia P1", "niba_power_p1"
-        ),
-        NibaPowerContractedSensor(
-            coordinator, "P2", "Niba Potencia P2", "niba_power_p2"
-        ),
+def period_attributes(coordinator: NibaCoordinator) -> dict:
+    data = consumption(coordinator)
+    api = api_consumption(coordinator)
+    diagnostic = block(coordinator, "daily_diagnostics")
 
-        # Autoconsumo.
-        NibaSelfConsumptionSensor(
-            coordinator,
-            "Niba Precio excedentes",
-            "niba_surplus_price",
-            ("usage_cl_price",),
-            unit="€/kWh",
+    return {
+        "inicio_periodo": data.get("start_at"),
+        "fin_periodo_inclusivo": data.get("end_at"),
+        "ultimo_dato": data.get("date_last_data"),
+        "dias_periodo": period_days(coordinator),
+        "dias_con_datos": data_days(coordinator),
+        "coste_energia_resumen_api_eur": amount_value(
+            api.get("consumption_amount")
         ),
-        NibaSelfConsumptionSensor(
-            coordinator,
-            "Niba Precio excedentes base",
-            "niba_surplus_base_price",
-            ("usage_base_price",),
-            unit="€/kWh",
-            entity_category=EntityCategory.DIAGNOSTIC,
+        "consumo_medio_api_kwh": number_value(
+            data.get("average_value")
         ),
-        NibaSelfConsumptionSensor(
-            coordinator,
-            "Niba Capacidad generación",
-            "niba_generation_capacity",
-            ("generation_capacity",),
-            unit=UnitOfPower.KILO_WATT,
-            device_class=SensorDeviceClass.POWER,
+        "coste_medio_api_eur": amount_value(
+            data.get("average_amount")
         ),
-        NibaSelfConsumptionSensor(
-            coordinator,
-            "Niba Tipo autoconsumo",
-            "niba_self_consumption_type",
-            ("self_consumption_type",),
-            entity_category=EntityCategory.DIAGNOSTIC,
+        "consumo_estimado_kwh": number_value(
+            data.get("estimated_consumption_value")
         ),
-        NibaSelfConsumptionSensor(
-            coordinator,
-            "Niba Modalidad compensación",
-            "niba_self_consumption_payment_type",
-            ("payment_type",),
-            entity_category=EntityCategory.DIAGNOSTIC,
+        "coste_energia_estimado_api_eur": amount_value(
+            api.get("estimated_consumption_amount")
         ),
-        NibaSelfConsumptionSensor(
-            coordinator,
-            "Niba CAU",
-            "niba_cau",
-            ("cau",),
-            entity_category=EntityCategory.DIAGNOSTIC,
+        "fuente_valor": "curvas_diarias",
+        "fuente_coste_periodo": "resumen de Niba",
+        "fecha_coste_periodo_api": api.get("date_last_data"),
+        "fecha_resumen_api": api.get("date_last_data"),
+        "consumo_periodo_api_kwh": number_value(
+            api.get("consumption_value")
         ),
-        NibaSelfConsumptionSensor(
-            coordinator,
-            "Niba Tipo CUPS autoconsumo",
-            "niba_self_consumption_cups_type",
-            ("cups_type",),
-            entity_category=EntityCategory.DIAGNOSTIC,
+        "consumo_estimado_api_kwh": number_value(
+            api.get("estimated_consumption_value")
         ),
-        NibaSelfConsumptionSensor(
-            coordinator,
-            "Niba Tipo instalación",
-            "niba_installation_type",
-            ("installation_type",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaSelfConsumptionSensor(
-            coordinator,
-            "Niba Subtipo autoconsumo",
-            "niba_self_consumption_subsection_type",
-            ("subsection_type",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaSelfConsumptionSensor(
-            coordinator,
-            "Niba Inicio autoconsumo",
-            "niba_self_consumption_start",
-            ("start_at",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
+        "diagnostico_curvas": {
+            key: diagnostic.get(key)
+            for key in (
+                "estado",
+                "fuente",
+                "dias_disponibles",
+                "hasta_fecha",
+                "resumen_api_hasta",
+            )
+        },
+    }
 
-        # Información técnica del CUPS.
-        NibaCupsTechnicalSensor(
-            coordinator,
-            "Niba CUPS técnico",
-            "niba_cups_technical_code",
-            ("cups",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCupsTechnicalSensor(
-            coordinator,
-            "Niba Tarifa ATR técnica",
-            "niba_cups_atr_code",
-            ("codigo_tarifa_atr_en_vigor",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCupsTechnicalSensor(
-            coordinator,
-            "Niba Perfil consumo",
-            "niba_consumption_profile",
-            ("tipo_perfil_consumo",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCupsTechnicalSensor(
-            coordinator,
-            "Niba Código autoconsumo",
-            "niba_self_consumption_code",
-            ("self_consumption_code",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCupsTechnicalSensor(
-            coordinator,
-            "Niba CNAE",
-            "niba_cnae",
-            ("cnae",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCupsTechnicalSensor(
-            coordinator,
-            "Niba Sistema medida",
-            "niba_metering_system",
-            ("system",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCupsTechnicalSensor(
-            coordinator,
-            "Niba Última lectura distribuidora",
-            "niba_last_meter_reading",
-            ("fecha_ultima_lectura",),
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCupsTechnicalSensor(
-            coordinator,
-            "Niba Potencia máxima BIEW",
-            "niba_biew_max_power",
-            ("BIEW_max_power",),
-            transform=NibaCupsTechnicalSensor.watts_to_kw,
-            unit=UnitOfPower.KILO_WATT,
-            device_class=SensorDeviceClass.POWER,
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCupsTechnicalSensor(
-            coordinator,
-            "Niba Potencia extensión",
-            "niba_extension_power",
-            ("valor_derechos_extension_w",),
-            transform=NibaCupsTechnicalSensor.watts_to_kw,
-            unit=UnitOfPower.KILO_WATT,
-            device_class=SensorDeviceClass.POWER,
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCupsTechnicalSensor(
-            coordinator,
-            "Niba Potencia técnica P1",
-            "niba_cups_power_p1",
-            ("potencias_contratadas_en_wp1",),
-            transform=NibaCupsTechnicalSensor.watts_to_kw,
-            unit=UnitOfPower.KILO_WATT,
-            device_class=SensorDeviceClass.POWER,
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCupsTechnicalSensor(
-            coordinator,
-            "Niba Potencia técnica P2",
-            "niba_cups_power_p2",
-            ("potencias_contratadas_en_wp2",),
-            transform=NibaCupsTechnicalSensor.watts_to_kw,
-            unit=UnitOfPower.KILO_WATT,
-            device_class=SensorDeviceClass.POWER,
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaDatadisSensor(coordinator),
 
-        # Bloques variables y de diagnóstico.
-        NibaCollectionSensor(
-            coordinator,
-            "Niba Registros consumo mensual",
-            "niba_consumption_monthly_data",
-            "consumption_monthly",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCollectionSensor(
-            coordinator,
-            "Niba Potencias medidas",
-            "niba_consumption_powers_data",
-            "consumption_powers",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCollectionSensor(
-            coordinator,
-            "Niba Consumo electrodomésticos",
-            "niba_appliances_consumption_data",
-            "appliances_consumption",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCollectionSensor(
-            coordinator, "Niba Facturas", "niba_bills", "bills"
-        ),
-        NibaMovementsSensor(coordinator),
-        NibaCollectionSensor(
-            coordinator,
-            "Niba Tarjetas de pago",
-            "niba_payment_cards",
-            "payment_cards",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCollectionSensor(
-            coordinator,
-            "Niba Casos",
-            "niba_cases",
-            "cases",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCollectionSensor(
-            coordinator,
-            "Niba Asistencias SVA",
-            "niba_sva_assistances",
-            "sva_assistances",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCollectionSensor(
-            coordinator,
-            "Niba Invitaciones",
-            "niba_invitations",
-            "invitations",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaCollectionSensor(
-            coordinator,
-            "Niba Reglas de gasto",
-            "niba_spending_rules",
-            "spending_rules",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        ),
-        NibaDocumentsSensor(coordinator),
-        NibaProductsCatalogSensor(coordinator),
-    ]
+def estimate_attributes(coordinator: NibaCoordinator) -> dict:
+    data = curve_estimate(coordinator)
 
-    async_add_entities(entities)
+    return {
+        "fuente": "Proyección a partir de curvas diarias cerradas",
+        "hasta_fecha_curvas": data.get("hasta_fecha"),
+        "dias_con_curvas": data.get("dias_con_datos"),
+        "dias_periodo": data.get("dias_periodo"),
+        "metodo": data.get("metodo"),
+        "consumo_estimado_api_kwh": number_value(
+            api_consumption(coordinator).get(
+                "estimated_consumption_value"
+            )
+        ),
+        "ultimo_dato_api": api_consumption(coordinator).get(
+            "date_last_data"
+        ),
+    }
+
+
+def daily_attributes(coordinator: NibaCoordinator) -> dict:
+    daily = daily_rows(coordinator)
+
+    return {
+        "fecha": latest_daily(coordinator).get("date"),
+        "dias_disponibles": len(daily),
+        "historico": [
+            {
+                "fecha": day.get("date"),
+                "importacion_kwh": number_value(
+                    day.get("total_active_value")
+                ),
+                "exportacion_kwh": number_value(
+                    day.get("total_out_active_value")
+                ),
+                "reactiva": number_value(
+                    day.get("total_reactive_value")
+                ),
+                "coste": amount_value(
+                    day.get("daily_consumption_amount")
+                ),
+            }
+            for day in daily
+        ],
+    }
+
+
+def hourly_attributes(
+    coordinator: NibaCoordinator,
+    field: str,
+) -> dict:
+    return {
+        "fecha": latest_daily(coordinator).get("date"),
+        "medidas_horarias": [
+            {
+                "hora": row.get("hour"),
+                "kwh": number_value(row.get(field)),
+            }
+            for row in measurements(coordinator)
+        ],
+    }
+
+
+def profile_attributes(coordinator: NibaCoordinator) -> dict:
+    return {
+        "fecha": latest_daily(coordinator).get("date"),
+        "medidas": [
+            {
+                "hour": row.get("hour"),
+                "active_value": number_value(
+                    row.get("active_value")
+                ),
+                "out_active_value": number_value(
+                    row.get("out_active_value")
+                ),
+                "reactive_value": number_value(
+                    row.get("reactive_value")
+                ),
+            }
+            for row in measurements(coordinator)
+        ],
+    }
 
 
 # ---------------------------------------------------------
-# BASE
+# CÁLCULOS
 # ---------------------------------------------------------
 
-class NibaBaseSensor(CoordinatorEntity, SensorEntity):
-    """Base Niba sensor."""
+def average_consumption(
+    coordinator: NibaCoordinator,
+) -> float | None:
+    value = number_value(
+        consumption(coordinator).get("consumption_value")
+    )
+    days = data_days(coordinator)
+
+    return (
+        round(value / days, 2)
+        if value is not None and days
+        else None
+    )
+
+
+def progress(coordinator: NibaCoordinator) -> float | None:
+    total = period_days(coordinator)
+
+    return round(
+        min(data_days(coordinator) / total * 100, 100),
+        1,
+    ) if total else None
+
+
+def projection_values(coordinator: NibaCoordinator) -> dict:
+    current = number_value(
+        consumption(coordinator).get(
+            "estimated_consumption_value"
+        )
+    )
+    bill = latest_bill(coordinator)
+    previous = number_value(
+        bill.get("act_total_consumption")
+    )
+    current_days = period_days(coordinator)
+    previous_days = inclusive_days(bill)
+
+    if (
+        current is None
+        or previous is None
+        or previous <= 0
+        or not current_days
+        or not previous_days
+    ):
+        return {}
+
+    current_daily = current / current_days
+    previous_daily = previous / previous_days
+
+    return {
+        "porcentaje": round(
+            (current_daily - previous_daily)
+            / previous_daily
+            * 100,
+            1,
+        ),
+        "proyeccion_actual_kwh": current,
+        "dias_periodo_actual": current_days,
+        "proyeccion_actual_kwh_dia": round(current_daily, 2),
+        "factura_anterior_kwh": previous,
+        "dias_factura_anterior": previous_days,
+        "factura_anterior_kwh_dia": round(previous_daily, 2),
+        "periodo_actual_inicio": consumption(coordinator).get(
+            "start_at"
+        ),
+        "factura_anterior_inicio": bill.get("start_at"),
+        "factura_anterior_fin": bill.get("end_at"),
+        "metodo": "comparación de medias diarias normalizadas",
+    }
+
+
+def watts_to_kw(value: Any) -> float | None:
+    value = number_value(value)
+
+    return (
+        round(value / 1000, 3)
+        if value is not None
+        else None
+    )
+
+
+# ---------------------------------------------------------
+# SENSOR BASE
+# ---------------------------------------------------------
+
+class NibaSensor(CoordinatorEntity, SensorEntity):
+    """Sensor with explicitly selected value and attributes."""
 
     _attr_has_entity_name = False
 
@@ -843,1649 +634,950 @@ class NibaBaseSensor(CoordinatorEntity, SensorEntity):
         coordinator: NibaCoordinator,
         name: str,
         unique_id: str,
+        value_fn: Callable,
         *,
-        entity_category: EntityCategory | None = None,
+        unit=None,
+        device_class=None,
+        state_class=None,
+        category=None,
+        attributes_fn=None,
     ) -> None:
         super().__init__(coordinator)
 
         self._attr_name = name
         self._attr_unique_id = unique_id
-        self._attr_entity_category = entity_category
+        self._attr_native_unit_of_measurement = unit
+        self._attr_device_class = device_class
+        self._attr_state_class = state_class
+        self._attr_entity_category = category
+        self._value_fn = value_fn
+        self._attributes_fn = attributes_fn
 
     @property
     def device_info(self):
         return {
             "identifiers": {
-                (DOMAIN, self.coordinator.config_entry.entry_id)
+                (DOMAIN, self.coordinator.entry.entry_id)
             },
             "name": "Niba energía",
             "manufacturer": "Niba",
             "model": "Niba API",
         }
 
-
-class NibaGenericSensor(NibaBaseSensor):
-    """Generic sensor reading coordinator data."""
-
-    def __init__(
-        self,
-        coordinator: NibaCoordinator,
-        name: str,
-        unique_id: str,
-        source: Callable[[NibaCoordinator], Any],
-        path: tuple[Any, ...],
-        *,
-        unit: str | None = None,
-        device_class: SensorDeviceClass | None = None,
-        state_class: SensorStateClass | None = None,
-        entity_category: EntityCategory | None = None,
-        transform: Callable[[Any], Any] | None = None,
-    ) -> None:
-        super().__init__(
-            coordinator,
-            name,
-            unique_id,
-            entity_category=entity_category,
-        )
-
-        self._source = source
-        self._path = path
-        self._transform = transform
-        self._attr_native_unit_of_measurement = unit
-        self._attr_device_class = device_class
-        self._attr_state_class = state_class
-
     @property
     def native_value(self):
-        data = self._source(self.coordinator)
-        value = nested_value(data, self._path)
+        value = self._value_fn(self.coordinator)
 
-        if self._transform:
-            value = self._transform(value)
-
-        if isinstance(value, (dict, list)):
+        if isinstance(value, (dict, list, tuple)):
             return None
 
-        # HA measured entities must not receive malformed, NaN or infinite
-        # numeric values from a partially changed API response.
         if (
             self._attr_native_unit_of_measurement is not None
-            or self._attr_device_class is not None
             or self._attr_state_class is not None
+            or self._attr_device_class in (
+                ENERGY,
+                MONEY,
+                POWER,
+            )
         ):
             return number_value(value)
 
         return value
 
-
-# ---------------------------------------------------------
-# PERIODO ACTUAL
-# ---------------------------------------------------------
-
-class NibaConsumptionPeriodSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Consumo periodo",
-            "niba_consumption_period",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self):
-        return number_value(
-            get_consumption(self.coordinator).get("consumption_value")
-        )
-
     @property
     def extra_state_attributes(self):
-        data = get_consumption(self.coordinator)
+        if self._attributes_fn is None:
+            return {}
 
-        return {
-            "cups": data.get("cups_electricity"),
-            "inicio_periodo": data.get("start_at"),
-            "fin_periodo_inclusivo": data.get("end_at"),
-            "ultimo_dato": data.get("date_last_data"),
-            "dias_periodo": current_period_days(self.coordinator),
-            "dias_con_datos": current_data_days(self.coordinator),
-            # This monetary value belongs to Niba's summary endpoint, whose
-            # cutoff can be newer than the daily curves above.
-            "coste_energia_resumen_api_eur": amount_value(
-                self.coordinator.data.get("consumption_api", {}).get(
-                    "consumption_amount"
-                )
-            ),
-            "consumo_medio_api_kwh": data.get("average_value"),
-            "coste_medio_api_eur": amount_value(data.get("average_amount")),
-            "consumo_estimado_kwh": data.get("estimated_consumption_value"),
-            "coste_energia_estimado_api_eur": amount_value(
-                self.coordinator.data.get("consumption_api", {}).get(
-                    "estimated_consumption_amount"
-                )
-            ),
-            "comparacion_periodo_anterior_api": data.get(
-                "previous_period_comparison"
-            ),
-            "fuente_valor": "curvas_diarias",
-            "fuente_coste_periodo": "resumen API de Niba",
-            "fecha_coste_periodo_api": self.coordinator.data.get(
-                "consumption_api", {}
-            ).get("date_last_data"),
-            "fecha_resumen_api": self.coordinator.data.get(
-                "consumption_api", {}
-            ).get("date_last_data"),
-            "consumo_periodo_api_kwh": self.coordinator.data.get(
-                "consumption_api", {}
-            ).get("consumption_value"),
-            "consumo_estimado_api_kwh": self.coordinator.data.get(
-                "consumption_api", {}
-            ).get("estimated_consumption_value"),
-            "diagnostico_curvas": self.coordinator.data.get(
-                "daily_diagnostics", {}
-            ),
-        }
+        return self._attributes_fn(self.coordinator)
 
 
-class NibaCostPeriodSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Coste energía periodo",
-            "niba_cost_period",
-        )
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
+# ---------------------------------------------------------
+# SETUP
+# ---------------------------------------------------------
 
-    @property
-    def native_value(self):
-        raw = self.coordinator.data.get("consumption_api", {})
-        if not isinstance(raw, dict):
-            return None
-        return amount_value(
-            raw.get("consumption_amount")
-        )
+async def async_setup_entry(hass, entry, async_add_entities):
+    coordinator: NibaCoordinator = hass.data[DOMAIN][entry.entry_id]
+    entities = []
 
-    @property
-    def extra_state_attributes(self):
-        raw = self.coordinator.data.get("consumption_api", {})
-        raw = raw if isinstance(raw, dict) else {}
-        return {
-            "tipo": "Coste de energía acumulado devuelto por Niba",
-            "inicio_periodo_api": raw.get("start_at"),
-            "fin_periodo_api": raw.get("end_at"),
-            "fecha_resumen_api": raw.get("date_last_data"),
-            "incluye_total_factura": False,
-        }
-
-
-class NibaEstimatedConsumptionSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Consumo estimado",
-            "niba_estimated_consumption",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self):
-        return number_value(
-            get_consumption(self.coordinator).get(
-                "estimated_consumption_value"
+    def add(name, uid, value_fn, **kwargs):
+        entities.append(
+            NibaSensor(
+                coordinator,
+                name,
+                uid,
+                value_fn,
+                **kwargs,
             )
         )
 
-    @property
-    def extra_state_attributes(self):
-        curves = self.coordinator.data.get("invoice_estimate", {})
-        api = self.coordinator.data.get("consumption_api", {})
-        curves = curves if isinstance(curves, dict) else {}
-        api = api if isinstance(api, dict) else {}
-        return {
-            "fuente": "Proyección a partir de curvas diarias cerradas",
-            "hasta_fecha_curvas": curves.get("hasta_fecha"),
-            "dias_con_curvas": curves.get("dias_con_datos"),
-            "dias_periodo": curves.get("dias_periodo"),
-            "metodo": curves.get("metodo"),
-            "consumo_estimado_api_kwh": number_value(
-                api.get("estimated_consumption_value")
-            ),
-            "ultimo_dato_api": api.get("date_last_data"),
-        }
-
-
-class NibaEstimatedCostSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Factura estimada",
-            "niba_estimated_cost",
-        )
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-
-    @property
-    def native_value(self):
-        return self.coordinator.data.get("invoice_estimate", {}).get("total_eur")
-
-    @property
-    def extra_state_attributes(self):
-        estimate = self.coordinator.data.get("invoice_estimate", {})
-        return estimate if isinstance(estimate, dict) else {}
-
-
-class NibaApiEstimatedCostSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(coordinator, "Niba Estimación energía API", "niba_estimated_cost_api",
-                         entity_category=EntityCategory.DIAGNOSTIC)
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-
-    @property
-    def native_value(self):
-        return amount_value(self.coordinator.data.get("consumption_api", {}).get("estimated_consumption_amount"))
-
-    @property
-    def extra_state_attributes(self):
-        raw = self.coordinator.data.get("consumption_api", {})
-        raw = raw if isinstance(raw, dict) else {}
-        return {
-            "fuente": "Resumen de consumo de Niba",
-            "incluye_total_factura": False,
-            "inicio_api": raw.get("start_at"),
-            "fin_api": raw.get("end_at"),
-            "ultimo_dato_api": raw.get("date_last_data"),
-            "consumo_api_kwh": number_value(raw.get("consumption_value")),
-            "coste_api_eur": amount_value(raw.get("consumption_amount")),
-            "consumo_estimado_api_kwh": number_value(
-                raw.get("estimated_consumption_value")
-            ),
-            "coste_estimado_api_eur": amount_value(
-                raw.get("estimated_consumption_amount")
-            ),
-        }
-
-
-class NibaApiConsumptionSensor(NibaBaseSensor):
-    """Expose Niba's own period summary separately from curve calculations."""
-
-    def __init__(self, coordinator, *, estimated: bool = False):
-        self._estimated = estimated
-        if estimated:
-            name = "Niba Consumo estimado API"
-            unique_id = "niba_consumption_estimated_api"
-        else:
-            name = "Niba Consumo periodo API"
-            unique_id = "niba_consumption_period_api"
-        super().__init__(
-            coordinator,
-            name,
-            unique_id,
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self):
-        raw = self.coordinator.data.get("consumption_api", {})
-        if not isinstance(raw, dict):
-            return None
-        key = (
-            "estimated_consumption_value"
-            if self._estimated
-            else "consumption_value"
-        )
-        return number_value(raw.get(key))
-
-    @property
-    def extra_state_attributes(self):
-        raw = self.coordinator.data.get("consumption_api", {})
-        raw = raw if isinstance(raw, dict) else {}
-        diagnostics = self.coordinator.data.get("daily_diagnostics", {})
-        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
-        return {
-            "inicio_periodo": raw.get("start_at"),
-            "fin_periodo": raw.get("end_at"),
-            "ultimo_dato_api": raw.get("date_last_data"),
-            "dias_curvas_disponibles": diagnostics.get("dias_disponibles"),
-            "hasta_fecha_curvas": diagnostics.get("hasta_fecha"),
-            "fuente": "endpoint consumption-period de Niba",
-        }
-
-
-class NibaPeriodFieldSensor(NibaGenericSensor):
-    def __init__(self, coordinator, name, unique_id, path, **kwargs):
-        super().__init__(
-            coordinator,
-            name,
-            unique_id,
-            get_consumption,
-            path,
-            **kwargs,
-        )
-
-
-class NibaCurrentAverageConsumptionSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Consumo medio diario",
-            "niba_average_consumption",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = None
-
-    @property
-    def native_value(self):
-        data = get_consumption(self.coordinator)
-        value = number_value(data.get("consumption_value"))
-        days = current_data_days(self.coordinator)
-
-        if value is None or not days:
-            return None
-
-        return round(value / days, 2)
-
-    @property
-    def extra_state_attributes(self):
-        data = get_consumption(self.coordinator)
-        latest = get_latest_daily(self.coordinator)
-        return {
-            "dias_con_datos": current_data_days(self.coordinator),
-            "hasta_fecha": latest.get("date"),
-            "fecha_resumen_api": self.coordinator.data.get("consumption_api", {}).get("date_last_data"),
-            "media_api": data.get("average_value"),
-            "metodo": "consumo_periodo / días con curvas disponibles",
-        }
-
-
-class NibaCurrentAverageCostSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Coste medio diario de energía",
-            "niba_average_cost",
-        )
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-
-    @property
-    def native_value(self):
-        raw = self.coordinator.data.get("consumption_api", {})
-        if not isinstance(raw, dict):
-            return None
-        return amount_value(raw.get("average_amount"))
-
-    @property
-    def extra_state_attributes(self):
-        raw = self.coordinator.data.get("consumption_api", {})
-        raw = raw if isinstance(raw, dict) else {}
-        return {
-            "fecha_resumen_api": raw.get("date_last_data"),
-            "metodo": "Valor medio diario devuelto por Niba",
-        }
-
-
-class NibaPeriodTotalDaysSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Días periodo",
-            "niba_period_total_days",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
-        self._attr_native_unit_of_measurement = "días"
-
-    @property
-    def native_value(self):
-        return current_period_days(self.coordinator)
-
-
-class NibaPeriodDataDaysSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Días con datos",
-            "niba_period_data_days",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
-        self._attr_native_unit_of_measurement = "días"
-
-    @property
-    def native_value(self):
-        return current_data_days(self.coordinator)
-
-
-class NibaPeriodProgressSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Progreso periodo",
-            "niba_period_progress",
-        )
-        self._attr_native_unit_of_measurement = "%"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-
-    @property
-    def native_value(self):
-        total = current_period_days(self.coordinator)
-        available = current_data_days(self.coordinator)
-
-        if not total or available is None:
-            return None
-
-        return round(min(available / total * 100, 100), 1)
-
-
-# ---------------------------------------------------------
-# FACTURA ANTERIOR REAL Y COMPARATIVA
-# ---------------------------------------------------------
-
-class NibaPreviousPeriodConsumptionSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Consumo factura anterior",
-            "niba_previous_period_consumption",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        # Preserve the state class previously exposed by this same unique_id.
-        # Home Assistant already has long-term statistics for the entity.
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self):
-        return number_value(
-            get_latest_bill(self.coordinator).get("act_total_consumption")
-        )
-
-
-class NibaPreviousPeriodCostSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Total factura anterior",
-            "niba_previous_period_cost",
-        )
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-
-    @property
-    def native_value(self):
-        return amount_value(get_latest_bill(self.coordinator).get("total_amount"))
-
-
-class NibaProjectionVsPreviousSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Proyección vs factura anterior",
-            "niba_projection_vs_previous",
-        )
-        self._attr_native_unit_of_measurement = "%"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-
-    def _values(self):
-        consumption = get_consumption(self.coordinator)
-        bill = get_latest_bill(self.coordinator)
-
-        projected = number_value(
-            consumption.get("estimated_consumption_value")
-        )
-        previous = number_value(bill.get("act_total_consumption"))
-        projected_days = current_period_days(self.coordinator)
-        previous_days = bill_days(bill)
-
-        if (
-            projected is None
-            or previous is None
-            or not projected_days
-            or not previous_days
-            or previous == 0
-        ):
-            return None
-
-        projected_daily = projected / projected_days
-        previous_daily = previous / previous_days
-
-        if previous_daily == 0:
-            return None
-
-        return {
-            "projected": projected,
-            "previous": previous,
-            "projected_days": projected_days,
-            "previous_days": previous_days,
-            "projected_daily": projected_daily,
-            "previous_daily": previous_daily,
-            "percentage": (
-                (projected_daily - previous_daily) / previous_daily * 100
-            ),
-        }
-
-    @property
-    def native_value(self):
-        values = self._values()
-        return round(values["percentage"], 1) if values else None
-
-    @property
-    def extra_state_attributes(self):
-        values = self._values()
-        bill = get_latest_bill(self.coordinator)
-        consumption = get_consumption(self.coordinator)
-
-        if not values:
-            return {}
-
-        return {
-            "proyeccion_actual_kwh": round(values["projected"], 2),
-            "dias_periodo_actual": values["projected_days"],
-            "proyeccion_actual_kwh_dia": round(
-                values["projected_daily"], 2
-            ),
-            "factura_anterior_kwh": round(values["previous"], 2),
-            "dias_factura_anterior": values["previous_days"],
-            "factura_anterior_kwh_dia": round(
-                values["previous_daily"], 2
-            ),
-            "periodo_actual_inicio": consumption.get("start_at"),
-            "factura_anterior_inicio": bill.get("start_at"),
-            "factura_anterior_fin": bill.get("end_at"),
-            "metodo": "comparación de medias diarias normalizadas",
-        }
-
-
-class NibaPreviousPeriodInfoSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Factura anterior periodo",
-            "niba_previous_period_info",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
-
-    @property
-    def native_value(self):
-        bill = get_latest_bill(self.coordinator)
-        start = bill.get("start_at")
-        end = bill.get("end_at")
-
-        if start and end:
-            return f"{start} → {end}"
-
-        return "Sin factura"
-
-    @property
-    def extra_state_attributes(self):
-        bill = get_latest_bill(self.coordinator)
-
-        if not bill:
-            return {}
-
-        return {
-            "inicio": bill.get("start_at"),
-            "fin": bill.get("end_at"),
-            "dias": bill_days(bill),
-            "consumo_kwh": bill.get("act_total_consumption"),
-            "total_eur": amount_value(bill.get("total_amount")),
-            "energia_eur": amount_value(bill.get("nm_term_ener")),
-            "potencia_eur": amount_value(bill.get("term_power")),
-            "excedentes_kwh": bill.get("self_consumption_surplus"),
-            "compensacion_eur": amount_value(
-                bill.get("self_consumption_discount")
-            ),
-            "estado": bill_status_text(bill.get("status")),
-            "codigo_factura": bill.get("billing_code"),
-        }
-
-
-# ---------------------------------------------------------
-# SENSORES DE LA ÚLTIMA FACTURA
-# ---------------------------------------------------------
-
-class NibaLatestBillFieldSensor(NibaGenericSensor):
-    def __init__(self, coordinator, name, unique_id, path, **kwargs):
-        super().__init__(
-            coordinator,
-            name,
-            unique_id,
-            get_latest_bill,
-            path,
-            **kwargs,
-        )
-
-
-class NibaLatestBillTotalSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Última factura total",
-            "niba_latest_bill_total",
-        )
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-
-    @property
-    def native_value(self):
-        return amount_value(get_latest_bill(self.coordinator).get("total_amount"))
-
-    @property
-    def extra_state_attributes(self):
-        bill = get_latest_bill(self.coordinator)
-
-        if not bill:
-            return {}
-
-        return {
-            "codigo_factura": bill.get("billing_code"),
-            "fecha_emision": bill.get("contab_date"),
-            "inicio": bill.get("start_at"),
-            "fin": bill.get("end_at"),
-            "dias": bill_days(bill),
-            "estado": bill_status_text(bill.get("status")),
-            "consumo_kwh": bill.get("act_total_consumption"),
-            "energia_eur": amount_value(bill.get("nm_term_ener")),
-            "potencia_eur": amount_value(bill.get("term_power")),
-            "excedentes_facturados_kwh": bill.get(
-                "self_consumption_surplus"
-            ),
-            "excedentes_medidos_kwh": bill.get("total_surplus"),
-            "compensacion_eur": amount_value(
-                bill.get("self_consumption_discount")
-            ),
-            "alquiler_eur": amount_value(bill.get("nm_rental_amount")),
-            "financiacion_bono_social_eur": bill_social_charge(bill),
-            "impuesto_electrico_eur": amount_value(
-                bill.get("nm_amount_ie")
-            ),
-            "iva_eur": amount_value(bill.get("tax_amount")),
-            "impuestos_totales_eur": bill_total_taxes(bill),
-            "base_iva_eur": amount_value(bill.get("base_amount")),
-            "potencia_contratada_p1_kw": bill.get("contract_pwr_p1"),
-            "potencia_contratada_p2_kw": bill.get("contract_pwr_p2"),
-            "potencia_demandada": bill.get("demand_pwr"),
-            "document_id": bill.get("document_id"),
-        }
-
-
-class NibaLatestBillPeriodSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Última factura periodo",
-            "niba_latest_bill_period",
-        )
-
-    @property
-    def native_value(self):
-        bill = get_latest_bill(self.coordinator)
-        start = bill.get("start_at")
-        end = bill.get("end_at")
-
-        if start and end:
-            return f"{start} → {end}"
-
-        return None
-
-    @property
-    def extra_state_attributes(self):
-        bill = get_latest_bill(self.coordinator)
-        return {
-            "inicio": bill.get("start_at"),
-            "fin": bill.get("end_at"),
-            "dias": bill_days(bill),
-        }
-
-
-class NibaLatestBillTaxesSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Última factura impuestos",
-            "niba_latest_bill_taxes",
-        )
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-
-    @property
-    def native_value(self):
-        return bill_total_taxes(get_latest_bill(self.coordinator))
-
-    @property
-    def extra_state_attributes(self):
-        bill = get_latest_bill(self.coordinator)
-        return {
-            "impuesto_electrico_eur": amount_value(
-                bill.get("nm_amount_ie")
-            ),
-            "iva_eur": amount_value(bill.get("tax_amount")),
-        }
-
-
-class NibaLatestBillSocialChargeSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Última factura financiación bono social",
-            "niba_latest_bill_social_charge",
-        )
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-
-    @property
-    def native_value(self):
-        return bill_social_charge(get_latest_bill(self.coordinator))
-
-    @property
-    def extra_state_attributes(self):
-        return {
-            "metodo": "calculado a partir de la base imponible de la factura"
-        }
-
-
-class NibaLatestBillStatusSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Última factura estado",
-            "niba_latest_bill_status",
-        )
-
-    @property
-    def native_value(self):
-        return bill_status_text(get_latest_bill(self.coordinator).get("status"))
-
-    @property
-    def extra_state_attributes(self):
-        bill = get_latest_bill(self.coordinator)
-        return {
-            "estado_api": bill.get("status"),
-            "codigo_factura": bill.get("billing_code"),
-            "fecha_emision": bill.get("contab_date"),
-        }
-
-
-# ---------------------------------------------------------
-# DAILY / GRID
-# ---------------------------------------------------------
-
-class NibaDailyConsumptionSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Consumo diario",
-            "niba_consumo_diario",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self):
-        return number_value(
-            get_latest_daily(self.coordinator).get("total_active_value")
-        )
-
-    @property
-    def extra_state_attributes(self):
-        data = self.coordinator.data.get("consumption_daily", {})
-        daily = (
-            data.get("daily_consumption", [])
-            if isinstance(data, dict)
-            else []
-        )
-
-        if not isinstance(daily, list):
-            daily = []
-
-        daily = sorted(
-            (day for day in daily if isinstance(day, dict)),
-            key=lambda day: str(day.get("date") or ""),
-        )
-
-        return {
-            "fecha": get_latest_daily(self.coordinator).get("date"),
-            "dias_disponibles": len(daily),
-            "historico": [
-                {
-                    "fecha": day.get("date"),
-                    "importacion_kwh": day.get("total_active_value"),
-                    "exportacion_kwh": day.get("total_out_active_value"),
-                    "reactiva": day.get("total_reactive_value"),
-                    "coste": amount_value(
-                        day.get("daily_consumption_amount")
-                    ),
-                }
-                for day in daily
-            ],
-        }
-
-
-class NibaGridImportSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Importación red último día",
-            "niba_grid_import",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self):
-        return number_value(
-            get_latest_daily(self.coordinator).get("total_active_value")
-        )
-
-    @property
-    def extra_state_attributes(self):
-        latest = get_latest_daily(self.coordinator)
-
-        return {
-            "fecha": latest.get("date"),
-            "medidas_horarias": [
-                {
-                    "hora": row.get("hour"),
-                    "kwh": row.get("active_value"),
-                }
-                for row in get_latest_measurements(self.coordinator)
-            ],
-        }
-
-
-class NibaGridExportSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Exportación red último día",
-            "niba_grid_export",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self):
-        return number_value(
-            get_latest_daily(self.coordinator).get("total_out_active_value")
-        )
-
-    @property
-    def extra_state_attributes(self):
-        latest = get_latest_daily(self.coordinator)
-
-        return {
-            "fecha": latest.get("date"),
-            "medidas_horarias": [
-                {
-                    "hora": row.get("hour"),
-                    "kwh": row.get("out_active_value"),
-                }
-                for row in get_latest_measurements(self.coordinator)
-            ],
-        }
-
-
-class NibaDailyReactiveSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Energía reactiva diaria",
-            "niba_daily_reactive",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
-        self._attr_native_unit_of_measurement = "kVArh"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-
-    @property
-    def native_value(self):
-        return number_value(
-            get_latest_daily(self.coordinator).get("total_reactive_value")
-        )
-
-
-class NibaDailyCostSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Coste diario API",
-            "niba_daily_cost",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-
-    @property
-    def native_value(self):
-        latest = get_latest_daily(self.coordinator)
-        return amount_value(latest.get("daily_consumption_amount"))
-
-    @property
-    def extra_state_attributes(self):
-        latest = get_latest_daily(self.coordinator)
-        return {
-            "fecha": latest.get("date"),
-            "fuente": "API Niba",
-            "nota": "Valor proporcionado directamente por Niba",
-        }
-
-
-class NibaHourlyProfileSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Perfil horario",
-            "niba_hourly_profile",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
-
-    @property
-    def native_value(self):
-        return len(get_latest_measurements(self.coordinator))
-
-    @property
-    def extra_state_attributes(self):
-        latest = get_latest_daily(self.coordinator)
-        return {
-            "fecha": latest.get("date"),
-            "medidas": get_latest_measurements(self.coordinator),
-        }
-
-
-class NibaLatestEnergyDateSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Fecha última curva",
-            "niba_latest_energy_date",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
-
-    @property
-    def native_value(self):
-        return get_latest_daily(self.coordinator).get("date")
-
-
-class NibaLatestEnergyHourSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Última hora medida",
-            "niba_latest_energy_hour",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
-
-    @property
-    def native_value(self):
-        measurements = get_latest_measurements(self.coordinator)
-        valid = [
-            row
-            for row in measurements
-            if isinstance(row, dict) and row.get("hour") is not None
-        ]
-
-        if not valid:
-            return None
-
-        valid.sort(key=lambda row: str(row.get("hour") or ""))
-        return valid[-1].get("hour")
-
-
-class NibaLatestHourImportSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Importación última hora",
-            "niba_latest_hour_import",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    def _latest_measurement(self):
-        measurements = get_latest_measurements(self.coordinator)
-        valid = [
-            row
-            for row in measurements
-            if isinstance(row, dict) and row.get("hour") is not None
-        ]
-        valid.sort(key=lambda row: str(row.get("hour") or ""))
-        return valid[-1] if valid else {}
-
-    @property
-    def native_value(self):
-        return number_value(self._latest_measurement().get("active_value"))
-
-    @property
-    def extra_state_attributes(self):
-        latest = get_latest_daily(self.coordinator)
-        row = self._latest_measurement()
-        return {"fecha": latest.get("date"), "hora": row.get("hour")}
-
-
-class NibaLatestHourExportSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Exportación última hora",
-            "niba_latest_hour_export",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    def _latest_measurement(self):
-        measurements = get_latest_measurements(self.coordinator)
-        valid = [
-            row
-            for row in measurements
-            if isinstance(row, dict) and row.get("hour") is not None
-        ]
-        valid.sort(key=lambda row: str(row.get("hour") or ""))
-        return valid[-1] if valid else {}
-
-    @property
-    def native_value(self):
-        return number_value(self._latest_measurement().get("out_active_value"))
-
-    @property
-    def extra_state_attributes(self):
-        latest = get_latest_daily(self.coordinator)
-        row = self._latest_measurement()
-        return {"fecha": latest.get("date"), "hora": row.get("hour")}
-
-
-# ---------------------------------------------------------
-# MONTHLY
-# ---------------------------------------------------------
-
-class NibaMonthlyConsumptionValueSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Consumo mensual",
-            "niba_monthly_consumption_value",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self):
-        return number_value(
-            get_latest_monthly(self.coordinator).get("consumption_value")
-        )
-
-    @property
-    def extra_state_attributes(self):
-        data = get_latest_monthly(self.coordinator)
-        return {
-            "fecha": data.get("date"),
-            "limite_a": data.get("a_limit"),
-            "limite_b": data.get("b_limit"),
-            "fuente": "endpoint mensual de Niba",
-        }
-
-
-class NibaMonthlyEstimatedConsumptionSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Consumo mensual estimado",
-            "niba_monthly_estimated_consumption",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self):
-        return number_value(
-            get_latest_monthly(self.coordinator).get(
-                "estimated_consumption_value"
-            )
-        )
-
-
-class NibaMonthlyAverageDailySensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Media diaria mensual API",
-            "niba_monthly_daily_average",
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = None
-
-    @property
-    def native_value(self):
-        value = get_latest_monthly(self.coordinator).get("consumption_day_avg")
-        value = number_value(value)
-        return round(value, 2) if value is not None else None
-
-    @property
-    def extra_state_attributes(self):
-        data = get_latest_monthly(self.coordinator)
-        return {
-            "fecha": data.get("date"),
-            "fuente": "API Niba; no calculado por Home Assistant",
-        }
-
-
-class NibaMonthlySelfConsumptionSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Autoconsumo mensual",
-            "niba_monthly_self_consumption",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
-        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_device_class = SensorDeviceClass.ENERGY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-    @property
-    def native_value(self):
-        return number_value(
-            get_latest_monthly(self.coordinator).get(
-                "self_consumption_energy"
-            )
-        )
-
-
-# ---------------------------------------------------------
-# BALANCES
-# ---------------------------------------------------------
-
-class NibaBalanceBaseSensor(NibaBaseSensor):
-    field = ""
-
-    @property
-    def native_value(self):
-        data = self.coordinator.data.get("balances", {})
-        if not isinstance(data, dict):
-            return None
-        return amount_value(data.get(self.field))
-
-
-class NibaBalanceSensor(NibaBalanceBaseSensor):
-    field = "amount"
-
-    def __init__(self, coordinator):
-        super().__init__(coordinator, "Niba Saldo disponible", "niba_balance")
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-
-
-class NibaPendingBalanceSensor(NibaBalanceBaseSensor):
-    field = "pending_amount"
-
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator, "Niba Saldo pendiente", "niba_pending_balance"
-        )
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-
-
-class NibaTotalLoadedSensor(NibaBalanceBaseSensor):
-    field = "total_loaded"
-
-    def __init__(self, coordinator):
-        super().__init__(coordinator, "Niba Total cargado", "niba_total_loaded")
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-
-class NibaTotalSpentSensor(NibaBalanceBaseSensor):
-    field = "total_spent"
-
-    def __init__(self, coordinator):
-        super().__init__(coordinator, "Niba Total gastado", "niba_total_spent")
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-        self._attr_state_class = SensorStateClass.TOTAL
-
-
-class NibaSolarBatterySensor(NibaBalanceBaseSensor):
-    field = "solar_battery"
-
-    def __init__(self, coordinator):
-        super().__init__(coordinator, "Niba Solar Battery", "niba_solar_battery")
-        self._attr_native_unit_of_measurement = CURRENCY_EURO
-        self._attr_device_class = SensorDeviceClass.MONETARY
-
-
-# ---------------------------------------------------------
-# USER
-# ---------------------------------------------------------
-
-class NibaUserFieldSensor(NibaBaseSensor):
-    def __init__(self, coordinator, name, unique_id, field):
-        super().__init__(coordinator, name, unique_id)
-        self._field = field
-
-    @property
-    def native_value(self):
-        user = self.coordinator.data.get("user", {})
-
-        if not isinstance(user, dict):
-            return None
-
-        value = user.get(self._field)
-        return None if isinstance(value, (dict, list)) else value
-
-    @property
-    def extra_state_attributes(self):
-        user = self.coordinator.data.get("user", {})
-
-        if not isinstance(user, dict):
-            return {}
-
-        document = user.get("document")
-        phone = user.get("phone")
-        datadis = user.get("datadis")
-        document = document if isinstance(document, dict) else {}
-        phone = phone if isinstance(phone, dict) else {}
-        datadis = datadis if isinstance(datadis, dict) else {}
-
-        return {
-            "document_type": document.get("type"),
-            "document_code": document.get("code"),
-            "telefono": phone.get("number"),
-            "prefijo_telefono": phone.get("prefix"),
-            "nacionalidad": user.get("nationality"),
-            "idioma": user.get("language"),
-            "proveedor_autenticacion": user.get("auth_provider"),
-            "account_id": user.get("account_id"),
-            "contact_email": user.get("contact_email"),
-            "is_guest": user.get("is_guest"),
-            "is_channels_user": user.get("is_channels_user"),
-            "datadis_estado": datadis.get("status"),
-            "datadis_fecha": datadis.get("date"),
-            "datadis_cups": datadis.get("cups"),
-        }
-
-
-class NibaUserEmailValidatedSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Email validado",
-            "niba_usuario_email_validado",
-        )
-
-    @property
-    def native_value(self):
-        user = self.coordinator.data.get("user", {})
-        if not isinstance(user, dict):
-            return None
-        return bool_text(user.get("is_validated"))
-
-
-class NibaDatadisSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Datadis",
-            "niba_datadis_status",
-            entity_category=EntityCategory.DIAGNOSTIC,
-        )
-
-    @property
-    def native_value(self):
-        user = self.coordinator.data.get("user", {})
-        if not isinstance(user, dict):
-            return None
-        datadis = user.get("datadis")
-        if not isinstance(datadis, dict):
-            return None
-        return datadis.get("status")
-
-    @property
-    def extra_state_attributes(self):
-        user = self.coordinator.data.get("user", {})
-        datadis = user.get("datadis") if isinstance(user, dict) else {}
-        datadis = datadis if isinstance(datadis, dict) else {}
-        return {"fecha": datadis.get("date"), "cups": datadis.get("cups")}
-
-
-# ---------------------------------------------------------
-# CONTRACT
-# ---------------------------------------------------------
-
-class NibaContractFieldSensor(NibaGenericSensor):
-    def __init__(self, coordinator, name, unique_id, path, **kwargs):
-        super().__init__(
-            coordinator,
-            name,
-            unique_id,
-            lambda c: c.data.get("contract", {}),
-            path,
-            **kwargs,
-        )
-
-
-class NibaContractProductSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Contrato producto",
-            "niba_contrato_producto",
-        )
-
-    @property
-    def native_value(self):
-        contract = self.coordinator.data.get("contract", {})
-
-        if not isinstance(contract, dict):
-            return None
-
-        product = contract.get("product")
-
-        if not isinstance(product, dict):
-            return product
-
-        return (
-            product.get("description")
-            or product.get("name")
-            or product.get("code")
-        )
-
-    @property
-    def extra_state_attributes(self):
-        contract = self.coordinator.data.get("contract", {})
-        product = (
-            contract.get("product") or {}
-            if isinstance(contract, dict)
-            else {}
-        )
-
-        if not isinstance(product, dict):
-            return {}
-
-        return {
-            "code": product.get("code"),
-            "name": product.get("name"),
-            "family": product.get("family"),
-            "family_code": product.get("family_code"),
-            "atr_tariff": product.get("atr_tariff"),
-            "min_power": product.get("min_power"),
-            "max_power": product.get("max_power"),
-            "powers": product.get("powers"),
-            "self_consumption": product.get("self_consumption"),
-        }
-
-
-class NibaContractAddressSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Contrato dirección",
-            "niba_contrato_direccion",
-        )
-
-    @property
-    def native_value(self):
-        contract = self.coordinator.data.get("contract", {})
-        if not isinstance(contract, dict):
-            return None
-        return format_address(contract.get("address"))
-
-
-class NibaContractV2Sensor(NibaGenericSensor):
-    def __init__(self, coordinator, name, unique_id, path, **kwargs):
-        super().__init__(
-            coordinator,
-            name,
-            unique_id,
-            get_contract_v2,
-            path,
-            **kwargs,
-        )
-
-
-# ---------------------------------------------------------
-# CONTRACTED POWER
-# ---------------------------------------------------------
-
-class NibaPowerContractedSensor(NibaBaseSensor):
-    def __init__(self, coordinator, key, name, unique_id):
-        super().__init__(coordinator, name, unique_id)
-        self._key = key
-        self._attr_native_unit_of_measurement = UnitOfPower.KILO_WATT
-        self._attr_device_class = SensorDeviceClass.POWER
-
-    def _power(self) -> dict:
-        contract = get_contract_v2(self.coordinator)
-        powers = nested_value(contract, ("product", "powers"))
-
-        if not isinstance(powers, list):
-            return {}
-
-        for power in powers:
-            if isinstance(power, dict) and power.get("key") == self._key:
-                return power
-
-        return {}
-
-    @property
-    def native_value(self):
-        return number_value(self._power().get("value"))
-
-    @property
-    def extra_state_attributes(self):
-        data = self._power()
-        return {
-            "periodo": data.get("key"),
-            "descripcion": data.get("description"),
-            "horario": data.get("schedule"),
-        }
-
-
-# ---------------------------------------------------------
-# SELF CONSUMPTION
-# ---------------------------------------------------------
-
-class NibaSelfConsumptionSensor(NibaGenericSensor):
-    def __init__(self, coordinator, name, unique_id, path, **kwargs):
-        def source(c):
-            contract = get_contract_v2(c)
-            value = nested_value(contract, ("product", "self_consumption"))
-            return value if isinstance(value, dict) else {}
-
-        super().__init__(
-            coordinator,
-            name,
-            unique_id,
-            source,
-            path,
-            **kwargs,
-        )
-
-
-# ---------------------------------------------------------
-# CUPS TECHNICAL
-# ---------------------------------------------------------
-
-class NibaCupsTechnicalSensor(NibaGenericSensor):
-    @staticmethod
-    def watts_to_kw(value):
-        if value in (None, ""):
-            return None
-
-        try:
-            return round(float(value) / 1000, 3)
-        except (TypeError, ValueError):
-            return None
-
-    def __init__(self, coordinator, name, unique_id, path, **kwargs):
-        super().__init__(
-            coordinator,
-            name,
-            unique_id,
-            get_cups_object,
-            path,
-            **kwargs,
-        )
-
-
-# ---------------------------------------------------------
-# COLLECTION / VARIABLE API DATA
-# ---------------------------------------------------------
-
-class NibaCollectionSensor(NibaBaseSensor):
-    def __init__(
-        self,
-        coordinator,
+    def field(
         name,
-        unique_id,
+        uid,
+        source,
         key,
         *,
-        entity_category=None,
+        transform=None,
+        **kwargs,
     ):
-        super().__init__(
-            coordinator,
+        def value_fn(c):
+            value = source(c).get(key)
+            return transform(value) if transform else value
+
+        add(name, uid, value_fn, **kwargs)
+
+    # -----------------------------------------------------
+    # PERIODO ACTUAL
+    # -----------------------------------------------------
+
+    field(
+        "Niba Consumo periodo",
+        "niba_consumption_period",
+        consumption,
+        "consumption_value",
+        unit=KWH,
+        device_class=ENERGY,
+        state_class=TOTAL,
+        attributes_fn=period_attributes,
+    )
+
+    field(
+        "Niba Coste energía periodo",
+        "niba_cost_period",
+        api_consumption,
+        "consumption_amount",
+        transform=amount_value,
+        unit=CURRENCY_EURO,
+        device_class=MONEY,
+        attributes_fn=api_attributes,
+    )
+
+    field(
+        "Niba Consumo estimado",
+        "niba_estimated_consumption",
+        consumption,
+        "estimated_consumption_value",
+        unit=KWH,
+        device_class=ENERGY,
+        state_class=TOTAL,
+        attributes_fn=estimate_attributes,
+    )
+
+    # Conserva el unique_id anterior.
+    # El importe es una estimación de energía, no de factura completa.
+    field(
+        "Niba Coste energía estimado",
+        "niba_estimated_cost",
+        api_consumption,
+        "estimated_consumption_amount",
+        transform=amount_value,
+        unit=CURRENCY_EURO,
+        device_class=MONEY,
+        attributes_fn=api_attributes,
+    )
+
+    field(
+        "Niba Estimación energía",
+        "niba_estimated_cost_api",
+        api_consumption,
+        "estimated_consumption_amount",
+        transform=amount_value,
+        unit=CURRENCY_EURO,
+        device_class=MONEY,
+        category=DIAGNOSTIC,
+        attributes_fn=api_attributes,
+    )
+
+    for name, uid, key in (
+        (
+            "Niba Consumo periodo resumen",
+            "niba_consumption_period_api",
+            "consumption_value",
+        ),
+        (
+            "Niba Consumo estimado resumen",
+            "niba_consumption_estimated_api",
+            "estimated_consumption_value",
+        ),
+    ):
+        field(
             name,
-            unique_id,
-            entity_category=entity_category,
-        )
-        self._key = key
-
-    def _value(self):
-        return self.coordinator.data.get(self._key)
-
-    @property
-    def native_value(self):
-        value = self._value()
-
-        if isinstance(value, (list, dict)):
-            return len(value)
-        if value is None:
-            return 0
-        return 1
-
-    @property
-    def extra_state_attributes(self):
-        value = self._value()
-
-        if isinstance(value, list):
-            return {"items": value, "elementos": len(value)}
-        if isinstance(value, dict):
-            return {"data": value, "elementos": len(value)}
-        return {"data": value}
-
-
-class NibaMovementsSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(coordinator, "Niba Movimientos", "niba_movements")
-
-    @property
-    def native_value(self):
-        data = self.coordinator.data.get("movements", {})
-        if not isinstance(data, dict):
-            return 0
-        items = data.get("items", [])
-        return len(items) if isinstance(items, list) else 0
-
-    @property
-    def extra_state_attributes(self):
-        data = self.coordinator.data.get("movements", {})
-        if not isinstance(data, dict):
-            return {}
-        return {"items": data.get("items", []), "next": data.get("next")}
-
-
-class NibaDocumentsSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Documentos",
-            "niba_documents",
-            entity_category=EntityCategory.DIAGNOSTIC,
+            uid,
+            api_consumption,
+            key,
+            unit=KWH,
+            device_class=ENERGY,
+            state_class=TOTAL,
+            category=DIAGNOSTIC,
+            attributes_fn=api_attributes,
         )
 
-    @property
-    def native_value(self):
-        documents = self.coordinator.data.get("documents", [])
-        return len(documents) if isinstance(documents, list) else 0
+    add(
+        "Niba Consumo medio diario",
+        "niba_average_consumption",
+        average_consumption,
+        unit=KWH,
+        device_class=ENERGY,
+        attributes_fn=lambda c: {
+            "dias_con_datos": data_days(c),
+            "hasta_fecha": latest_daily(c).get("date"),
+            "metodo": "consumo periodo / días con curvas disponibles",
+        },
+    )
 
-    @property
-    def extra_state_attributes(self):
-        documents = self.coordinator.data.get("documents", [])
+    field(
+        "Niba Coste medio diario de energía",
+        "niba_average_cost",
+        api_consumption,
+        "average_amount",
+        transform=amount_value,
+        unit=CURRENCY_EURO,
+        device_class=MONEY,
+        attributes_fn=api_attributes,
+    )
 
-        if not isinstance(documents, list):
-            return {}
+    for name, uid, key in (
+        (
+            "Niba Último dato",
+            "niba_last_data",
+            "date_last_data",
+        ),
+        (
+            "Niba Inicio periodo",
+            "niba_period_start",
+            "start_at",
+        ),
+        (
+            "Niba Fin periodo",
+            "niba_period_end",
+            "end_at",
+        ),
+        (
+            "Niba Comparación periodo anterior",
+            "niba_previous_period_comparison",
+            "previous_period_comparison",
+        ),
+    ):
+        field(
+            name,
+            uid,
+            consumption,
+            key,
+            category=DIAGNOSTIC,
+        )
 
-        return {
-            "documentos": [
+    add(
+        "Niba Días periodo",
+        "niba_period_total_days",
+        period_days,
+        unit="días",
+        category=DIAGNOSTIC,
+    )
+
+    add(
+        "Niba Días con datos",
+        "niba_period_data_days",
+        data_days,
+        unit="días",
+        category=DIAGNOSTIC,
+    )
+
+    add(
+        "Niba Progreso periodo",
+        "niba_period_progress",
+        progress,
+        unit="%",
+        state_class=MEASUREMENT,
+    )
+
+    # -----------------------------------------------------
+    # FACTURA ANTERIOR Y COMPARATIVA
+    # -----------------------------------------------------
+
+    field(
+        "Niba Consumo factura anterior",
+        "niba_previous_period_consumption",
+        latest_bill,
+        "act_total_consumption",
+        unit=KWH,
+        device_class=ENERGY,
+        state_class=TOTAL,
+    )
+
+    field(
+        "Niba Total factura anterior",
+        "niba_previous_period_cost",
+        latest_bill,
+        "total_amount",
+        transform=amount_value,
+        unit=CURRENCY_EURO,
+        device_class=MONEY,
+    )
+
+    add(
+        "Niba Proyección vs factura anterior",
+        "niba_projection_vs_previous",
+        lambda c: projection_values(c).get("porcentaje"),
+        unit="%",
+        state_class=MEASUREMENT,
+        attributes_fn=projection_values,
+    )
+
+    add(
+        "Niba Factura anterior periodo",
+        "niba_previous_period_info",
+        bill_period,
+        category=DIAGNOSTIC,
+        attributes_fn=bill_attributes,
+    )
+
+    add(
+        "Niba Última factura periodo",
+        "niba_latest_bill_period",
+        bill_period,
+        attributes_fn=lambda c: {
+            "inicio": latest_bill(c).get("start_at"),
+            "fin": latest_bill(c).get("end_at"),
+            "dias": inclusive_days(latest_bill(c)),
+        },
+    )
+
+    # -----------------------------------------------------
+    # ÚLTIMA FACTURA
+    # -----------------------------------------------------
+
+    for name, uid, key in (
+        (
+            "Niba Última factura total",
+            "niba_latest_bill_total",
+            "total_amount",
+        ),
+        (
+            "Niba Última factura energía",
+            "niba_latest_bill_energy",
+            "nm_term_ener",
+        ),
+        (
+            "Niba Última factura potencia",
+            "niba_latest_bill_power",
+            "term_power",
+        ),
+        (
+            "Niba Última factura compensación",
+            "niba_latest_bill_discount",
+            "self_consumption_discount",
+        ),
+        (
+            "Niba Última factura alquiler",
+            "niba_latest_bill_rental",
+            "nm_rental_amount",
+        ),
+        (
+            "Niba Última factura impuesto eléctrico",
+            "niba_latest_bill_electricity_tax",
+            "nm_amount_ie",
+        ),
+        (
+            "Niba Última factura IVA",
+            "niba_latest_bill_vat",
+            "tax_amount",
+        ),
+    ):
+        field(
+            name,
+            uid,
+            latest_bill,
+            key,
+            transform=amount_value,
+            unit=CURRENCY_EURO,
+            device_class=MONEY,
+            attributes_fn=(
+                bill_attributes
+                if uid == "niba_latest_bill_total"
+                else None
+            ),
+        )
+
+    for name, uid, key in (
+        (
+            "Niba Última factura consumo",
+            "niba_latest_bill_consumption",
+            "act_total_consumption",
+        ),
+        (
+            "Niba Última factura excedentes facturados",
+            "niba_latest_bill_surplus",
+            "self_consumption_surplus",
+        ),
+    ):
+        field(
+            name,
+            uid,
+            latest_bill,
+            key,
+            unit=KWH,
+            device_class=ENERGY,
+        )
+
+    add(
+        "Niba Última factura impuestos",
+        "niba_latest_bill_taxes",
+        lambda c: bill_taxes(latest_bill(c)),
+        unit=CURRENCY_EURO,
+        device_class=MONEY,
+    )
+
+    add(
+        "Niba Última factura financiación bono social",
+        "niba_latest_bill_social_charge",
+        lambda c: bill_social_charge(latest_bill(c)),
+        unit=CURRENCY_EURO,
+        device_class=MONEY,
+        attributes_fn=lambda c: {
+            "metodo": (
+                "calculado a partir de la base imponible "
+                "de la factura"
+            ),
+        },
+    )
+
+    field(
+        "Niba Última factura estado",
+        "niba_latest_bill_status",
+        latest_bill,
+        "status",
+        transform=status_text,
+        attributes_fn=lambda c: {
+            "fecha_emision": latest_bill(c).get("contab_date"),
+        },
+    )
+
+    add(
+        "Niba Facturas",
+        "niba_bills",
+        lambda c: len(
+            rows(mapping(c.data).get("bills"))
+        ),
+        attributes_fn=lambda c: {
+            "items": [
                 {
-                    "document_id": item.get("document_id"),
-                    "document_type": item.get("document_type"),
-                    "disponible": bool(
-                        (item.get("data") or {}).get("document")
+                    "inicio": bill.get("start_at"),
+                    "fin": bill.get("end_at"),
+                    "fecha_emision": bill.get("contab_date"),
+                    "consumo_kwh": number_value(
+                        bill.get("act_total_consumption")
+                    ),
+                    "total_eur": amount_value(
+                        bill.get("total_amount")
+                    ),
+                    "estado": status_text(
+                        bill.get("status")
                     ),
                 }
-                for item in documents
-                if isinstance(item, dict)
-            ]
-        }
+                for bill in rows(
+                    mapping(c.data).get("bills")
+                )
+            ],
+        },
+    )
 
+    # -----------------------------------------------------
+    # ENERGÍA DIARIA Y HORARIA
+    # -----------------------------------------------------
 
-class NibaProductsCatalogSensor(NibaBaseSensor):
-    def __init__(self, coordinator):
-        super().__init__(
-            coordinator,
-            "Niba Catálogo productos",
-            "niba_products_catalog",
-            entity_category=EntityCategory.DIAGNOSTIC,
+    field(
+        "Niba Consumo diario",
+        "niba_consumo_diario",
+        latest_daily,
+        "total_active_value",
+        unit=KWH,
+        device_class=ENERGY,
+        state_class=TOTAL,
+        attributes_fn=daily_attributes,
+    )
+
+    for name, uid, daily_key, hourly_key in (
+        (
+            "Niba Importación red último día",
+            "niba_grid_import",
+            "total_active_value",
+            "active_value",
+        ),
+        (
+            "Niba Exportación red último día",
+            "niba_grid_export",
+            "total_out_active_value",
+            "out_active_value",
+        ),
+    ):
+        field(
+            name,
+            uid,
+            latest_daily,
+            daily_key,
+            unit=KWH,
+            device_class=ENERGY,
+            state_class=TOTAL,
+            attributes_fn=(
+                lambda c, key=hourly_key: hourly_attributes(c, key)
+            ),
         )
 
-    @property
-    def native_value(self):
-        products = self.coordinator.data.get("products", [])
-        return len(products) if isinstance(products, list) else 0
+    field(
+        "Niba Energía reactiva diaria",
+        "niba_daily_reactive",
+        latest_daily,
+        "total_reactive_value",
+        unit="kVArh",
+        state_class=MEASUREMENT,
+        category=DIAGNOSTIC,
+    )
 
-    @property
-    def extra_state_attributes(self):
-        products = self.coordinator.data.get("products", [])
+    field(
+        "Niba Coste diario",
+        "niba_daily_cost",
+        latest_daily,
+        "daily_consumption_amount",
+        transform=amount_value,
+        unit=CURRENCY_EURO,
+        device_class=MONEY,
+        category=DIAGNOSTIC,
+        attributes_fn=lambda c: {
+            "fecha": latest_daily(c).get("date"),
+            "fuente": "Niba",
+        },
+    )
 
-        if not isinstance(products, list):
-            return {}
+    add(
+        "Niba Perfil horario",
+        "niba_hourly_profile",
+        lambda c: len(measurements(c)),
+        category=DIAGNOSTIC,
+        attributes_fn=profile_attributes,
+    )
 
-        summary = []
+    field(
+        "Niba Fecha última curva",
+        "niba_latest_energy_date",
+        latest_daily,
+        "date",
+        category=DIAGNOSTIC,
+    )
 
-        for product in products:
-            if not isinstance(product, dict):
-                continue
+    field(
+        "Niba Última hora medida",
+        "niba_latest_energy_hour",
+        latest_hour,
+        "hour",
+        category=DIAGNOSTIC,
+    )
 
-            summary.append(
-                {
-                    "id": product.get("id"),
-                    "code": product.get("code"),
-                    "name": product.get("name"),
-                    "family": product.get("family"),
-                    "client_type": product.get("client_type"),
-                    "client_types": product.get("client_types"),
-                    "self_consumption": product.get("self_consumption"),
-                    "solar_prices": product.get("solar_prices"),
-                }
-            )
+    for name, uid, key in (
+        (
+            "Niba Importación última hora",
+            "niba_latest_hour_import",
+            "active_value",
+        ),
+        (
+            "Niba Exportación última hora",
+            "niba_latest_hour_export",
+            "out_active_value",
+        ),
+    ):
+        field(
+            name,
+            uid,
+            latest_hour,
+            key,
+            unit=KWH,
+            device_class=ENERGY,
+            state_class=TOTAL,
+            attributes_fn=lambda c: {
+                "fecha": latest_daily(c).get("date"),
+                "hora": latest_hour(c).get("hour"),
+            },
+        )
 
-        return {
-            "producto_contratado": self.coordinator.data.get(
-                "contract_tariff", {}
-            ),
-            "productos": summary,
-        }
+    # -----------------------------------------------------
+    # CONSUMO MENSUAL
+    # -----------------------------------------------------
+
+    for name, uid, key, state, category in (
+        (
+            "Niba Consumo mensual",
+            "niba_monthly_consumption_value",
+            "consumption_value",
+            TOTAL,
+            None,
+        ),
+        (
+            "Niba Consumo mensual estimado",
+            "niba_monthly_estimated_consumption",
+            "estimated_consumption_value",
+            TOTAL,
+            None,
+        ),
+        (
+            "Niba Media diaria mensual",
+            "niba_monthly_daily_average",
+            "consumption_day_avg",
+            None,
+            None,
+        ),
+        (
+            "Niba Autoconsumo mensual",
+            "niba_monthly_self_consumption",
+            "self_consumption_energy",
+            TOTAL,
+            DIAGNOSTIC,
+        ),
+    ):
+        field(
+            name,
+            uid,
+            latest_monthly,
+            key,
+            unit=KWH,
+            device_class=ENERGY,
+            state_class=state,
+            category=category,
+            attributes_fn=lambda c: {
+                "fecha": latest_monthly(c).get("date"),
+                "fuente": "Niba",
+            },
+        )
+
+    # -----------------------------------------------------
+    # SALDOS
+    # Sin movimientos ni métodos de pago.
+    # -----------------------------------------------------
+
+    for name, uid, key, state in (
+        (
+            "Niba Saldo disponible",
+            "niba_balance",
+            "amount",
+            None,
+        ),
+        (
+            "Niba Saldo pendiente",
+            "niba_pending_balance",
+            "pending_amount",
+            None,
+        ),
+        (
+            "Niba Total cargado",
+            "niba_total_loaded",
+            "total_loaded",
+            TOTAL,
+        ),
+        (
+            "Niba Total gastado",
+            "niba_total_spent",
+            "total_spent",
+            TOTAL,
+        ),
+        (
+            "Niba Solar Battery",
+            "niba_solar_battery",
+            "solar_battery",
+            None,
+        ),
+    ):
+        field(
+            name,
+            uid,
+            lambda c: block(c, "balances"),
+            key,
+            transform=amount_value,
+            unit=CURRENCY_EURO,
+            device_class=MONEY,
+            state_class=state,
+        )
+
+    # -----------------------------------------------------
+    # CONTRATO Y TARIFA
+    # Sin nombre, correo, dirección, número de contrato o CUPS.
+    # -----------------------------------------------------
+
+    for name, uid, key in (
+        (
+            "Niba Contrato estado",
+            "niba_contrato_estado",
+            "status",
+        ),
+        (
+            "Niba Contrato inicio",
+            "niba_contrato_inicio",
+            "start_at",
+        ),
+        (
+            "Niba Contrato fin",
+            "niba_contrato_fin",
+            "end_at",
+        ),
+    ):
+        field(
+            name,
+            uid,
+            contract,
+            key,
+        )
+
+    add(
+        "Niba Contrato producto",
+        "niba_contrato_producto",
+        lambda c: (
+            product(c).get("description")
+            or product(c).get("name")
+            or product(c).get("code")
+        ),
+    )
+
+    for name, uid, key, category in (
+        (
+            "Niba Producto código",
+            "niba_product_code",
+            "code",
+            None,
+        ),
+        (
+            "Niba Producto nombre",
+            "niba_product_name",
+            "name",
+            None,
+        ),
+        (
+            "Niba Producto descripción",
+            "niba_product_description",
+            "description",
+            None,
+        ),
+        (
+            "Niba Producto familia",
+            "niba_product_family",
+            "family",
+            DIAGNOSTIC,
+        ),
+        (
+            "Niba Tarifa ATR",
+            "niba_atr_tariff",
+            "atr_tariff",
+            DIAGNOSTIC,
+        ),
+    ):
+        field(
+            name,
+            uid,
+            product,
+            key,
+            category=category,
+        )
+
+    for period, uid in (
+        ("P1", "niba_power_p1"),
+        ("P2", "niba_power_p2"),
+    ):
+        add(
+            f"Niba Potencia {period}",
+            uid,
+            lambda c, p=period: contracted_power(c, p).get("value"),
+            unit=KW,
+            device_class=POWER,
+            attributes_fn=lambda c, p=period: {
+                "periodo": p,
+            },
+        )
+
+    # -----------------------------------------------------
+    # AUTOCONSUMO
+    # Sin CAU ni códigos identificativos del suministro.
+    # -----------------------------------------------------
+
+    for name, uid, key, unit, device, category in (
+        (
+            "Niba Precio excedentes",
+            "niba_surplus_price",
+            "usage_cl_price",
+            "€/kWh",
+            None,
+            None,
+        ),
+        (
+            "Niba Precio excedentes base",
+            "niba_surplus_base_price",
+            "usage_base_price",
+            "€/kWh",
+            None,
+            DIAGNOSTIC,
+        ),
+        (
+            "Niba Capacidad generación",
+            "niba_generation_capacity",
+            "generation_capacity",
+            KW,
+            POWER,
+            None,
+        ),
+        (
+            "Niba Tipo autoconsumo",
+            "niba_self_consumption_type",
+            "self_consumption_type",
+            None,
+            None,
+            DIAGNOSTIC,
+        ),
+        (
+            "Niba Modalidad compensación",
+            "niba_self_consumption_payment_type",
+            "payment_type",
+            None,
+            None,
+            DIAGNOSTIC,
+        ),
+        (
+            "Niba Tipo CUPS autoconsumo",
+            "niba_self_consumption_cups_type",
+            "cups_type",
+            None,
+            None,
+            DIAGNOSTIC,
+        ),
+        (
+            "Niba Tipo instalación",
+            "niba_installation_type",
+            "installation_type",
+            None,
+            None,
+            DIAGNOSTIC,
+        ),
+        (
+            "Niba Subtipo autoconsumo",
+            "niba_self_consumption_subsection_type",
+            "subsection_type",
+            None,
+            None,
+            DIAGNOSTIC,
+        ),
+        (
+            "Niba Inicio autoconsumo",
+            "niba_self_consumption_start",
+            "start_at",
+            None,
+            None,
+            DIAGNOSTIC,
+        ),
+    ):
+        field(
+            name,
+            uid,
+            self_consumption,
+            key,
+            unit=unit,
+            device_class=device,
+            category=category,
+        )
+
+    # -----------------------------------------------------
+    # INFORMACIÓN TÉCNICA
+    # -----------------------------------------------------
+
+    for name, uid, key in (
+        (
+            "Niba Tarifa ATR técnica",
+            "niba_cups_atr_code",
+            "codigo_tarifa_atr_en_vigor",
+        ),
+        (
+            "Niba Perfil consumo",
+            "niba_consumption_profile",
+            "tipo_perfil_consumo",
+        ),
+        (
+            "Niba CNAE",
+            "niba_cnae",
+            "cnae",
+        ),
+        (
+            "Niba Sistema medida",
+            "niba_metering_system",
+            "system",
+        ),
+        (
+            "Niba Última lectura distribuidora",
+            "niba_last_meter_reading",
+            "fecha_ultima_lectura",
+        ),
+    ):
+        field(
+            name,
+            uid,
+            technical,
+            key,
+            category=DIAGNOSTIC,
+        )
+
+    for name, uid, key in (
+        (
+            "Niba Potencia máxima BIEW",
+            "niba_biew_max_power",
+            "BIEW_max_power",
+        ),
+        (
+            "Niba Potencia extensión",
+            "niba_extension_power",
+            "valor_derechos_extension_w",
+        ),
+        (
+            "Niba Potencia técnica P1",
+            "niba_cups_power_p1",
+            "potencias_contratadas_en_wp1",
+        ),
+        (
+            "Niba Potencia técnica P2",
+            "niba_cups_power_p2",
+            "potencias_contratadas_en_wp2",
+        ),
+    ):
+        field(
+            name,
+            uid,
+            technical,
+            key,
+            transform=watts_to_kw,
+            unit=KW,
+            device_class=POWER,
+            category=DIAGNOSTIC,
+        )
+
+    # -----------------------------------------------------
+    # LIMPIEZA DEL REGISTRO DE ENTIDADES ANTIGUAS
+    #
+    # Limitada a:
+    # - Esta entrada de configuración.
+    # - La plataforma Niba.
+    # - El dominio sensor.
+    # - Los 24 unique_id retirados.
+    #
+    # No elimina el historial de Recorder.
+    # -----------------------------------------------------
+
+    registry = er.async_get(hass)
+
+    registered_entities = list(
+        er.async_entries_for_config_entry(
+            registry,
+            entry.entry_id,
+        )
+    )
+
+    for registered in registered_entities:
+        if (
+            registered.platform == DOMAIN
+            and registered.domain == "sensor"
+            and registered.unique_id in RETIRED_UNIQUE_IDS
+        ):
+            registry.async_remove(registered.entity_id)
+
+    async_add_entities(entities)
+    
