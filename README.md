@@ -16,14 +16,32 @@ utilizada no es pública y puede cambiar sin previo aviso.
 La disponibilidad de cada dato depende de Niba y de la cuenta. La integración
 no genera lecturas que la API no haya publicado.
 
-## Instalación con HACS
+## Instalación
 
-1. En HACS, abre **Integraciones → ⋮ → Repositorios personalizados**.
-2. Añade `https://github.com/Home24alberto/home-assistant-niba` con categoría
-   **Integración**.
-3. Instala **Niba Energía** y reinicia Home Assistant.
-4. Ve a **Ajustes → Dispositivos y servicios → Añadir integración**, busca
-   **Niba Energía** e inicia sesión.
+### Desde HACS — recomendado
+
+Niba Energía está incluida en el catálogo de HACS.
+
+1. Abre **HACS** en Home Assistant.
+2. Busca **Niba Energía**.
+3. Abre la integración y descárgala.
+4. Reinicia Home Assistant.
+5. Ve a **Ajustes → Dispositivos y servicios → Añadir integración**.
+6. Busca **Niba Energía**.
+7. Introduce el correo electrónico y la contraseña de tu cuenta de Niba.
+
+No es necesario introducir los precios de tu tarifa manualmente.
+
+### Alternativa: repositorio personalizado
+
+Si Niba Energía todavía no aparece en la búsqueda de HACS:
+
+1. Abre **HACS → ⋮ → Repositorios personalizados**.
+2. Añade esta dirección:
+   https://github.com/Home24alberto/home-assistant-niba
+3. Selecciona la categoría **Integración**.
+4. Añade el repositorio y descarga **Niba Energía**.
+5. Reinicia Home Assistant y configura la integración siguiendo los pasos anteriores.
 
 ## Datos de consumo
 
