@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import ipaddress
+from urllib.parse import quote, urljoin, urlsplit
 from typing import Any
 
 import aiohttp
@@ -429,6 +431,63 @@ class NibaApiClient:
 
     async def get_document(self, document_id: str):
         return await self.get(
-            f"/api/documents/{document_id}",
+            f"/api/documents/{quote(document_id, safe='')}",
             optional=True,
         )
+
+
+    async def get_invoice_pdf(self, document_id: str) -> bytes:
+        """Download a signed document without forwarding the API credentials."""
+        response = await self.get_document(document_id)
+        link = response.get("document") if isinstance(response, dict) else None
+        if not isinstance(link, str):
+            raise NibaApiError("Documento de factura no disponible")
+        try:
+            connector = aiohttp.TCPConnector(resolver=_PublicResolver())
+            async with aiohttp.ClientSession(
+                connector=connector, cookie_jar=aiohttp.DummyCookieJar(),
+                timeout=aiohttp.ClientTimeout(total=45), trust_env=False,
+            ) as session:
+                for _ in range(4):
+                    parts = urlsplit(link)
+                    if (parts.scheme != "https" or not parts.hostname
+                            or parts.username or parts.password or parts.port not in (None, 443)):
+                        raise ValueError
+                    try:
+                        address = ipaddress.ip_address(parts.hostname)
+                    except ValueError:
+                        address = None
+                    if address is not None and not address.is_global:
+                        raise ValueError
+                    async with session.get(
+                        link, headers={"Accept": "application/pdf"}, allow_redirects=False,
+                    ) as download:
+                        if download.status in (301, 302, 303, 307, 308):
+                            target = download.headers.get("Location")
+                            if not target:
+                                raise ValueError
+                            link = urljoin(link, target)
+                            continue
+                        if download.status != 200:
+                            raise ValueError
+                        content = bytearray()
+                        async for chunk in download.content.iter_chunked(65536):
+                            content.extend(chunk)
+                            if len(content) > 20_000_000:
+                                raise ValueError
+                        if not content.startswith(b"%PDF-"):
+                            raise ValueError
+                        return bytes(content)
+                raise ValueError
+        except Exception:
+            raise NibaApiError("No se pudo descargar el PDF de factura") from None
+
+
+class _PublicResolver(aiohttp.resolver.ThreadedResolver):
+    """Reject private download destinations, including DNS resolved addresses."""
+
+    async def resolve(self, host, port=0, family=0):
+        addresses = await super().resolve(host, port, family)
+        if not addresses or any(not ipaddress.ip_address(a["host"]).is_global for a in addresses):
+            raise OSError("Destino de documento no permitido")
+        return addresses

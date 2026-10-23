@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 import logging
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -16,7 +17,9 @@ from homeassistant.util import dt as dt_util
 
 from .api import NibaApiClient, NibaApiError, NibaAuthenticationError
 from .billing import as_date, estimate, month_bounds, period_matches
+from .contract_prices import ContractTableError, read_contract_pdf, reconcile_contract_invoice
 from .const import UPDATE_INTERVAL
+from .invoice import InvoiceError, estimate_invoice, parse_pdf
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -239,6 +242,14 @@ class NibaCoordinator(DataUpdateCoordinator):
         self._last_bills: list[dict] = []
         self._daily_month = None
         self._selected_cups = None
+        self._invoice_key = None
+        self._tariff = None
+        self._tariff_status = "sin_factura"
+        self._invoice_retry = None
+        self._contract_price_key = None
+        self._contract_prices = None
+        self._contract_price_retry = None
+        self._contract_price_status = "contrato_sin_precios_verificados"
 
         super().__init__(
             hass,
@@ -256,7 +267,7 @@ class NibaCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self):
         try:
-            # No user profile, cards, movements or documents are requested.
+            # Retrieve energy data and documents used to validate contracted prices.
             contracts_raw = await self.api.get_contracts()
             contracts = [
                 item
@@ -267,7 +278,10 @@ class NibaCoordinator(DataUpdateCoordinator):
             if not contracts:
                 raise UpdateFailed("Niba no devuelve contratos")
 
-            selected_contract = contracts[0]
+            active = [c for c in contracts if str(c.get("status", "")).casefold() == "active"]
+            if len(active) > 1:
+                raise UpdateFailed("Varios suministros activos: selección automática no disponible")
+            selected_contract = active[0] if active else contracts[0]
             cups = selected_contract.get("cups")
 
             if not isinstance(cups, str) or not cups:
@@ -279,10 +293,14 @@ class NibaCoordinator(DataUpdateCoordinator):
                 self._last_bills = []
                 self._daily_month = None
                 self._selected_cups = cups
+                self._invoice_key = None
+                self._tariff = None
+                self._tariff_status = "sin_factura"
+                self._invoice_retry = None
 
             self.contract = safe_contract(selected_contract)
 
-            today = dt_util.now().date()
+            today = dt_util.now().astimezone(ZoneInfo("Europe/Madrid")).date()
             period_start, period_end = month_bounds(
                 today, selected_contract.get("start_at")
             )
@@ -455,9 +473,84 @@ class NibaCoordinator(DataUpdateCoordinator):
                 bills = self._last_bills
 
             latest_bill = bills[-1] if bills else {}
+            raw_bills = [b for b in bills_raw if isinstance(b, dict)] if isinstance(bills_raw, list) else []
+            raw_bills.sort(key=self._bill_sort_key)
+            raw_latest = raw_bills[-1] if raw_bills else None
+            if raw_latest:
+                key = (raw_latest.get("document_id"), raw_latest.get("end_at"),
+                       str(raw_latest.get("total_amount")), raw_latest.get("status"))
+                now = dt_util.now()
+                changed = key != self._invoice_key
+                if changed or (self._tariff is None and (self._invoice_retry is None or now >= self._invoice_retry)):
+                    self._invoice_key = key
+                    self._tariff = None
+                    self._invoice_retry = now + timedelta(hours=6)
+                    if not isinstance(key[0], str) or not key[0]:
+                        self._tariff_status = "factura_sin_documento"
+                    elif str(raw_latest.get("status", "")).upper() in ("CANCELLED", "ANULADA"):
+                        self._tariff_status = "factura_anulada"
+                    else:
+                        try:
+                            pdf = await self.api.get_invoice_pdf(key[0])
+                            self._tariff = await self.hass.async_add_executor_job(parse_pdf, pdf, raw_latest)
+                            self._tariff_status = "factura_validada"
+                        except NibaAuthenticationError:
+                            raise
+                        except NibaApiError:
+                            self._tariff_status = "descarga_factura_no_disponible"
+                        except InvoiceError as err:
+                            self._tariff_status = str(err)
+            calculation_contract = dict(selected_v2 or selected_contract)
+            document_id = calculation_contract.get("document_id") or selected_contract.get("document_id")
+            contract_key = (cups, document_id, calculation_contract.get("start_at"),
+                            calculation_contract.get("end_at"))
+            now = dt_util.now()
+            if contract_key != self._contract_price_key or self._contract_price_retry is None or now >= self._contract_price_retry:
+                self._contract_price_key = contract_key
+                self._contract_prices = None
+                self._contract_price_retry = now + timedelta(hours=6)
+                self._contract_price_status = "contrato_sin_documento"
+                if isinstance(document_id, str) and document_id:
+                    try:
+                        contract_pdf = await self.api.get_invoice_pdf(document_id)
+                        self._contract_prices = await self.hass.async_add_executor_job(read_contract_pdf, contract_pdf)
+                        self._contract_price_status = "contrato_leido"
+                    except NibaAuthenticationError:
+                        raise
+                    except NibaApiError:
+                        self._contract_price_status = "descarga_contrato_no_disponible"
+                    except ContractTableError as err:
+                        self._contract_price_status = str(err)
+            effective_tariff = None
+            effective_status = self._tariff_status
+            if self._tariff is not None:
+                effective_status = self._contract_price_status
+                if self._contract_prices is not None:
+                    try:
+                        effective_tariff = reconcile_contract_invoice(self._contract_prices, self._tariff)
+                        effective_status = "contrato_y_factura_coinciden"
+                    except ContractTableError as err:
+                        effective_status = str(err)
 
-            # Preserve the existing calculation of consumption projections.
-            # Do not invent a total invoice amount from an energy-only cost.
+            # Address stays private. The first supported version uses mainland/Balearic schedules and IVA.
+            address = selected_contract.get("address") or {}
+            postal = str(address.get("postal") or "") if isinstance(address, dict) else ""
+            calculated = estimate_invoice(daily_consumption, period_start, period_end, today,
+                                          effective_tariff, calculation_contract)
+            if not effective_tariff:
+                calculated["estado"] = effective_status
+            if not (len(postal) == 5 and postal.isdigit() and 1 <= int(postal[:2]) <= 50
+                    and postal[:2] not in ("35", "38")):
+                calculated = {"estado": "territorio_no_validado", "provisional": True}
+            calculated["estado_tarifa"] = effective_status
+            calculated["fuente_precios"] = (
+                "contrato contrastado con ultima factura" if effective_tariff else "sin_validar"
+            )
+            calculated["fuente_otros_cargos"] = "ultima factura; referencia provisional"
+            calculated["fuente_curvas"] = daily_source
+
+            # Keep measured kWh and the legacy arithmetic diagnostic separately.
+            # Primary forecasts come from the validated hourly calculation.
             invoice_estimate = select_fields(
                 estimate(
                     daily_consumption,
@@ -477,9 +570,7 @@ class NibaCoordinator(DataUpdateCoordinator):
                     "consumption_value": invoice_estimate.get(
                         "consumo_medido_kwh"
                     ),
-                    "estimated_consumption_value": invoice_estimate.get(
-                        "consumo_estimado_kwh"
-                    ),
+                    "estimated_consumption_value": calculated.get("consumo_previsto_kwh"),
                     "api_date_last_data": consumption_api.get(
                         "date_last_data"
                     ),
@@ -505,6 +596,7 @@ class NibaCoordinator(DataUpdateCoordinator):
                 "consumption": consumption,
                 "consumption_api": consumption_api,
                 "invoice_estimate": invoice_estimate,
+                "calculated_invoice": calculated,
                 "consumption_daily": {
                     "daily_consumption": daily_consumption,
                 },

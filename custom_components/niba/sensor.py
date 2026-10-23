@@ -119,6 +119,23 @@ def curve_estimate(coordinator: NibaCoordinator) -> dict:
     return block(coordinator, "invoice_estimate")
 
 
+def calculated(coordinator: NibaCoordinator) -> dict:
+    return block(coordinator, "calculated_invoice")
+
+
+def accrued(coordinator: NibaCoordinator) -> dict:
+    return mapping(calculated(coordinator).get("acumulado"))
+
+
+def forecast(coordinator: NibaCoordinator) -> dict:
+    return mapping(calculated(coordinator).get("prevision"))
+
+
+def calculation_attributes(coordinator: NibaCoordinator) -> dict:
+    data = calculated(coordinator)
+    return {key: value for key, value in data.items() if key != "ultimo_dia"}
+
+
 def daily_rows(coordinator: NibaCoordinator) -> list[dict]:
     data = block(coordinator, "consumption_daily")
 
@@ -398,7 +415,8 @@ def api_attributes(coordinator: NibaCoordinator) -> dict:
         "coste_estimado_api_eur": amount_value(
             data.get("estimated_consumption_amount")
         ),
-        "incluye_total_factura": False,
+        "incluye_total_factura": None,
+        "interpretacion_importe": "Importe de Niba sin desglose verificado",
     }
 
 
@@ -429,7 +447,8 @@ def period_attributes(coordinator: NibaCoordinator) -> dict:
             api.get("estimated_consumption_amount")
         ),
         "fuente_valor": "curvas_diarias",
-        "fuente_coste_periodo": "resumen de Niba",
+        "fuente_coste_periodo": "curvas horarias y precios del contrato",
+        "hasta_fecha_coste": calculated(coordinator).get("hasta_fecha"),
         "fecha_coste_periodo_api": api.get("date_last_data"),
         "fecha_resumen_api": api.get("date_last_data"),
         "consumo_periodo_api_kwh": number_value(
@@ -744,12 +763,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
     field(
         "Niba Coste energía periodo",
         "niba_cost_period",
-        api_consumption,
-        "consumption_amount",
+        accrued,
+        "energia_eur",
         transform=amount_value,
         unit=CURRENCY_EURO,
         device_class=MONEY,
-        attributes_fn=api_attributes,
+        attributes_fn=calculation_attributes,
     )
 
     field(
@@ -760,7 +779,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         unit=KWH,
         device_class=ENERGY,
         state_class=TOTAL,
-        attributes_fn=estimate_attributes,
+        attributes_fn=calculation_attributes,
     )
 
     # Conserva el unique_id anterior.
@@ -768,16 +787,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
     field(
         "Niba Coste energía estimado",
         "niba_estimated_cost",
-        api_consumption,
-        "estimated_consumption_amount",
+        forecast,
+        "energia_eur",
         transform=amount_value,
         unit=CURRENCY_EURO,
         device_class=MONEY,
-        attributes_fn=api_attributes,
+        attributes_fn=calculation_attributes,
     )
 
     field(
-        "Niba Estimación energía",
+        "Niba Importe previsto resumen API",
         "niba_estimated_cost_api",
         api_consumption,
         "estimated_consumption_amount",
@@ -828,12 +847,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
     field(
         "Niba Coste medio diario de energía",
         "niba_average_cost",
-        api_consumption,
-        "average_amount",
+        accrued,
+        "coste_medio_diario_eur",
         transform=amount_value,
         unit=CURRENCY_EURO,
         device_class=MONEY,
-        attributes_fn=api_attributes,
+        attributes_fn=calculation_attributes,
     )
 
     for name, uid, key in (
@@ -889,6 +908,44 @@ async def async_setup_entry(hass, entry, async_add_entities):
         unit="%",
         state_class=MEASUREMENT,
     )
+
+    # Totals use new unique IDs: historical energy sensors never become bill totals.
+    for name, uid, source, key in (
+        ("Niba Factura acumulada calculada", "niba_invoice_accrued", accrued, "total_eur"),
+        ("Niba Factura prevista calculada", "niba_invoice_forecast", forecast, "total_eur"),
+        ("Niba Potencia acumulada calculada", "niba_power_accrued_cost", accrued, "potencia_eur"),
+        ("Niba Compensación calculada", "niba_surplus_accrued_credit", accrued, "compensacion_eur"),
+        ("Niba Alquiler acumulado", "niba_rental_accrued", accrued, "alquiler_eur"),
+        ("Niba Bono social acumulado", "niba_social_accrued", accrued, "bono_social_eur"),
+        ("Niba Impuesto eléctrico acumulado", "niba_electricity_tax_accrued", accrued, "impuesto_electrico_eur"),
+        ("Niba IVA acumulado", "niba_vat_accrued", accrued, "iva_eur"),
+        ("Niba Importe resumen", "niba_cost_period_api", api_consumption, "consumption_amount"),
+    ):
+        field(name, uid, source, key, transform=amount_value,
+              unit=CURRENCY_EURO, device_class=MONEY,
+              category=DIAGNOSTIC if source is api_consumption else None,
+              attributes_fn=api_attributes if source is api_consumption else calculation_attributes)
+
+    field("Niba Consumo valorado", "niba_priced_consumption", calculated, "consumo_kwh",
+          unit=KWH, device_class=ENERGY, state_class=TOTAL, attributes_fn=calculation_attributes)
+    field("Niba Días contabilizados", "niba_priced_days", calculated, "dias_valorados",
+          unit="días", attributes_fn=calculation_attributes)
+    field("Niba Contabilizado hasta", "niba_priced_until", calculated, "hasta_fecha",
+          attributes_fn=calculation_attributes)
+    field("Niba Estado cálculo factura", "niba_invoice_calculation_status", calculated, "estado",
+          category=DIAGNOSTIC, attributes_fn=calculation_attributes)
+    field("Niba Estado previsión factura", "niba_invoice_forecast_status", calculated, "estado_prevision",
+          category=DIAGNOSTIC, attributes_fn=calculation_attributes)
+    for band in ("punta", "llano", "valle"):
+        field(f"Niba Consumo valorado {band}", f"niba_priced_consumption_{band}",
+              lambda c: mapping(calculated(c).get("consumo_por_periodo_kwh")), band,
+              unit=KWH, device_class=ENERGY, state_class=TOTAL,
+              attributes_fn=lambda c: {"hasta_fecha": calculated(c).get("hasta_fecha")})
+        field(f"Niba Precio contratado {band}", f"niba_invoice_price_{band}",
+              lambda c: mapping(calculated(c).get("tarifa")), "energia_" + band,
+              unit="€/kWh", category=DIAGNOSTIC,
+              attributes_fn=lambda c: {"factura_referencia_fin": mapping(calculated(c).get("tarifa")).get("fin_factura"),
+                                       "fuente": "Contrato contrastado con última factura; importe provisional"})
 
     # -----------------------------------------------------
     # FACTURA ANTERIOR Y COMPARATIVA
@@ -1136,16 +1193,14 @@ async def async_setup_entry(hass, entry, async_add_entities):
     field(
         "Niba Coste diario",
         "niba_daily_cost",
-        latest_daily,
-        "daily_consumption_amount",
+        lambda c: mapping(calculated(c).get("ultimo_dia")),
+        "energia_eur",
         transform=amount_value,
         unit=CURRENCY_EURO,
         device_class=MONEY,
         category=DIAGNOSTIC,
-        attributes_fn=lambda c: {
-            "fecha": latest_daily(c).get("date"),
-            "fuente": "Niba",
-        },
+        attributes_fn=lambda c: {"fecha": calculated(c).get("hasta_fecha"),
+                                  "fuente": "Curvas horarias y precios del contrato"},
     )
 
     add(

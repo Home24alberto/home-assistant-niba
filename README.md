@@ -43,48 +43,64 @@ Si Niba Energía todavía no aparece en la búsqueda de HACS:
 4. Añade el repositorio y descarga **Niba Energía**.
 5. Reinicia Home Assistant y configura la integración siguiendo los pasos anteriores.
 
-## Datos de consumo
+## Versión 2.1.0
 
-Niba ofrece un resumen del periodo y, por separado, curvas diarias. El resumen
-puede indicar una fecha posterior a la última curva disponible. La integración
-conserva esa diferencia: las entidades terminadas en **API** muestran el
-resumen de Niba; **Niba Consumo diario** y las entidades de curvas reflejan
-únicamente las fechas recibidas en la respuesta diaria. Si Niba publica menos
-días, las fechas ausentes no se rellenan ni se estiman como lecturas reales.
+Publicación estable. El cálculo de factura es orientativo y su compatibilidad
+depende de que se puedan validar los precios y documentos del contrato.
+El contraste con un mes completo de curvas sigue pendiente; no se anuncia
+compatibilidad con todas las tarifas.
 
-Para interpretar los sensores sin mezclar fuentes ni fechas:
+## Consumo y coste del periodo actual
 
-| Sensor | Dato que representa |
-| --- | --- |
-| **Niba Consumo periodo** | Suma de las curvas diarias disponibles; los atributos indican hasta qué fecha llegan. |
-| **Niba Consumo periodo API** | Consumo acumulado comunicado por el resumen de Niba y su última fecha de actualización. |
-| **Niba Consumo estimado** | Proyección de kWh calculada con las curvas diarias cerradas disponibles. |
-| **Niba Consumo estimado API** | Proyección de kWh comunicada por Niba. |
-| **Niba Coste energía periodo** | Coste de energía que devuelve Niba; no es el total de la factura. |
-| **Niba Estimación energía API** | Coste de energía estimado por Niba; no incluye necesariamente potencia, impuestos u otros conceptos. |
-| **Niba Consumo mensual** | Dato del endpoint mensual de Niba, independiente del resumen del periodo y de las curvas. |
+El cálculo usa las curvas horarias publicadas y los precios del documento del
+contrato, contrastados con la última factura. No usa precios del catálogo
+comercial. El lector requiere una tabla reconocible y precios inequívocos.
+Si contrato y factura difieren, no elige un precio silenciosamente: indica el
+motivo y deja el cálculo monetario sin valor.
 
-En un panel, empareja el coste con los sensores de consumo **API** y muestra
-aparte la suma o proyección de curvas, junto con su fecha. Así no se comparan
-por error periodos distintos cuando las curvas llegan con retraso.
+El total acumulado incluye energía, potencia, compensación de excedentes,
+alquiler, financiación del bono social, impuesto eléctrico e IVA. Los cargos
+adicionales e impuestos son referencias de la última factura, cuya continuidad
+se supone provisionalmente. No se garantiza que sigan vigentes ante cambios
+contractuales, fiscales o de condiciones.
 
-Cuando una consulta de curvas falla temporalmente, se conserva en memoria la
-última respuesta válida del periodo y los atributos de diagnóstico indican si
-se están mostrando datos en caché. Reiniciar Home Assistant borra esa caché
-temporal; Niba debe volver a publicar las curvas para recuperarlas.
+Solo se valoran días consecutivos completos desde el comienzo del mes. El
+consumo valorado, el coste y la fecha de cobertura figuran juntos en los nuevos
+sensores. Si faltan horas o sus sumas no coinciden con el total diario, se
+interrumpe la valoración; no se rellenan huecos con cero. Los sensores antiguos
+de consumo pueden incluir otras curvas disponibles y muestran su propia fecha.
 
-## Costes y previsiones
+La previsión al cierre es independiente del acumulado. Se estima con las
+observaciones disponibles por tipo de día y solo cuando hay muestra suficiente.
+La factura oficial sigue siendo el importe definitivo. El periodo calculado es
+el mes natural; no representa automáticamente ciclos de facturación distintos.
 
-No hay que introducir una tarifa para usar la integración. El sensor **Niba
-Estimación energía API** muestra el coste estimado que devuelve Niba al iniciar
-sesión. Ese importe corresponde al coste de energía indicado por la API; no se
-presenta como total de factura cuando no incluye potencia, impuestos u otros
-conceptos.
+### Alcance comprobado
 
-La previsión de consumo en kWh se calcula con la media de curvas diarias
-cerradas recibidas. Es una proyección orientativa, no una lectura real ni una
-previsión completa del importe de la factura. El total definitivo lo establece
-Niba en la factura oficial.
+- Lector de tabla Niba Tres con tres precios de energía y dos de potencia.
+- Horarios de Península y Baleares, con control de cambios de hora.
+- Compensación fija cuando coincide con la factura de referencia.
+- Validación aritmética del desglose de la factura y pruebas unitarias.
+
+No se han validado formatos Zen, Flex/indexados, Ceuta, Melilla ni Canarias.
+Tampoco se calculan facturas con ajustes de saldo, descuentos u otros servicios
+no representados por el modelo. Se requiere una factura compatible de referencia;
+una cuenta nueva sin ella podrá mostrar consumos, pero no este total estimado.
+Con varios suministros activos la selección automática no está disponible.
+
+### Actualización y paneles existentes
+
+Los identificadores de las entidades existentes se conservan. Los sensores de
+coste de energía pasan a usar el cálculo horario; los importes del resumen de
+Niba quedan como diagnóstico, sin atribuirles un desglose que no está verificado.
+Los nuevos sensores de total acumulado y previsión incluyen la compensación:
+no debe descontarse de nuevo en una tarjeta. Revisa las plantillas antes de
+sustituir las tarjetas antiguas. El panel no se modifica automáticamente.
+
+Los documentos se procesan en memoria; no se publican PDFs, enlaces firmados
+ni datos personales en los atributos. Los precios se mantienen en memoria y
+se recuperan de nuevo después de reiniciar. Home Assistant instala la dependencia
+PDF declarada en el manifest; el usuario no instala lectores por terminal.
 
 ## Privacidad y soporte
 
