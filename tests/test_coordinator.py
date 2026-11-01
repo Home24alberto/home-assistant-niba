@@ -18,6 +18,16 @@ def test_auto_tariff_download_cache_and_failure(monkeypatch):
         return m
     class Coordinator:
         def __init__(self,hass,**kwargs): self.hass=hass
+    class Store:
+        saved = None
+        def __init__(self, *args): pass
+        async def async_load(self):
+            from copy import deepcopy
+            return deepcopy(Store.saved)
+        async def async_save(self, data):
+            from copy import deepcopy
+            Store.saved = deepcopy(data)
+    module('homeassistant.helpers.storage', Store=Store)
     class AuthError(Exception): pass
     class UpdateError(Exception): pass
     module('homeassistant')
@@ -36,7 +46,7 @@ def test_auto_tariff_download_cache_and_failure(monkeypatch):
     monkeypatch.setattr(mod,'read_contract_pdf',lambda pdf:dict(prices))
     async def execute(fn,*args): return fn(*args)
     hass=SimpleNamespace(async_add_executor_job=execute)
-    co=mod.NibaCoordinator(hass,SimpleNamespace(data={'email':'test','password':'test'}))
+    co=mod.NibaCoordinator(hass,SimpleNamespace(entry_id='test',data={'email':'test','password':'test'}))
     c=contract();c.update(cups='private-cups',status='Active',address={'postal':'28001'},document_id='private-contract')
     b=dict(BILL,document_id='private-doc',status='PAID')
     methods={
@@ -65,4 +75,31 @@ def test_auto_tariff_download_cache_and_failure(monkeypatch):
         assert 'acumulado' not in third['calculated_invoice']
         await co._async_update_data()
         assert co.api.get_invoice_pdf.await_count==3  # Bounded retries, no 15-minute PDF loop.
+        # Restart from persisted storage at rollover, then receive the last day's curves.
+        monkeypatch.setattr(mod.dt_util, 'now', lambda: datetime(2026,11,1,tzinfo=timezone.utc))
+        new = mod.NibaCoordinator(hass,SimpleNamespace(entry_id='test',data={'email':'test','password':'test'}))
+        new.api=SimpleNamespace(**{k:AsyncMock(return_value=v) for k,v in methods.items()})
+        async def days(cups, start, end):
+            if start == '2026-10-01':
+                return [row(date(2026,10,d)) for d in range(1,32)]
+            return []
+        new.api.get_consumption_daily.side_effect=days
+        result=await new._async_update_data()
+        history=result['cycle_history']
+        assert history['ciclos_guardados']==2
+        assert history['ultimo_cierre']['completo'] is True
+        assert history['ultimo_cierre']['dias_valorados']==31
+        assert history['ultimo_cierre']['total_al_cierre_eur'] != history['ultimo_cierre']['total_calculado_eur']
+        assert result['calculated_invoice']['acumulado']['total_eur']==0
+        assert 'private' not in repr(result)
+        # A storage failure must fail the update, without committing a fake saved snapshot.
+        original=new._history.data.copy()
+        monkeypatch.setattr(mod.dt_util, 'now', lambda: datetime(2026,11,2,tzinfo=timezone.utc))
+        new._history_store.async_save=AsyncMock(side_effect=OSError('disk full'))
+        try:
+            await new._async_update_data()
+            assert False, 'storage failure should surface'
+        except UpdateError as err:
+            assert 'historial' in str(err)
+        assert new._history.data==original
     asyncio.run(run())

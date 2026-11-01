@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 import logging
+from copy import deepcopy
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
@@ -20,6 +22,7 @@ from .billing import as_date, estimate, month_bounds, period_matches
 from .contract_prices import ContractTableError, read_contract_pdf, reconcile_contract_invoice
 from .const import UPDATE_INTERVAL
 from .invoice import InvoiceError, estimate_invoice, parse_pdf
+from .history import CycleHistory, supply_key
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -226,6 +229,8 @@ class NibaCoordinator(DataUpdateCoordinator):
         entry: ConfigEntry,
     ) -> None:
         self.entry = entry
+        self._history_store = Store(hass, 1, f"niba_cycles_{entry.entry_id}")
+        self._history = None
         self.email = entry.data["email"]
         self.password = entry.data["password"]
 
@@ -258,6 +263,39 @@ class NibaCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
 
+    async def _complete_previous_cycle(self, history, supply, cups):
+        """Fetch late final-day curves without replacing the pre-close snapshot."""
+        pending = [c for c in history.cycles(supply).values()
+                   if c.get("closed") and not c.get("complete")
+                   and c.get("calculation", {}).get("tarifa") and c.get("contract")]
+        if not pending:
+            return
+        cycle = sorted(pending, key=lambda c: c["start"])[-1]
+        try:
+            raw = await self.api.get_consumption_daily(cups, cycle["start"], cycle["end"])
+        except NibaApiError:
+            cycle["completion_status"] = "consulta_cierre_no_disponible"
+            return
+        if isinstance(raw, dict):
+            raw = raw.get("daily_consumption")
+        if not isinstance(raw, list):
+            cycle["completion_status"] = "consulta_cierre_no_disponible"
+            return
+        start, end = as_date(cycle["start"]), as_date(cycle["end"])
+        days = {r["date"]: r for r in cycle.get("daily", [])}
+        for row in raw:
+            if isinstance(row, dict) and (d := as_date(row.get("date"))) and start <= d <= end:
+                days[row["date"]] = safe_day(row)
+        final = estimate_invoice(list(days.values()), start, end, end + timedelta(days=1),
+                                 cycle["calculation"]["tarifa"], cycle["contract"])
+        if final.get("dias_valorados") == (end-start).days+1 and final.get("hasta_fecha") == end.isoformat():
+            cycle["final_calculation"] = final
+            cycle["final_daily"] = [days[k] for k in sorted(days)]
+            cycle["complete"] = True
+            cycle["completion_status"] = "completo_con_curvas_posteriores"
+        else:
+            cycle["completion_status"] = "pendiente_curvas_cierre"
+
     @staticmethod
     def _bill_sort_key(bill: dict) -> tuple[str, str]:
         return (
@@ -267,6 +305,8 @@ class NibaCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self):
         try:
+            if self._history is None:
+                self._history = CycleHistory(await self._history_store.async_load())
             # Retrieve energy data and documents used to validate contracted prices.
             contracts_raw = await self.api.get_contracts()
             contracts = [
@@ -307,9 +347,10 @@ class NibaCoordinator(DataUpdateCoordinator):
             last_data = min(today, period_end)
             year_start = date(today.year, 1, 1)
 
+            history_supply = supply_key(cups)
             month_key = (cups, period_start.isoformat())
             if month_key != self._daily_month:
-                self._last_daily = []
+                self._last_daily = self._history.restore_days(history_supply, period_start)
                 self._daily_month = month_key
 
             contracts_v2_raw = await self.api.get_contracts_v2()
@@ -383,12 +424,18 @@ class NibaCoordinator(DataUpdateCoordinator):
                 received_daily = self._last_daily
                 daily_response_received = False
 
+            # Preserve received days across partial/empty responses and restarts.
+            cached_daily = {r["date"]: r for r in self._last_daily if r.get("date")}
+            for row in received_daily:
+                if isinstance(row, dict) and row.get("date"):
+                    cached_daily[row["date"]] = row
+            retained_cache = bool(self._last_daily) and not received_daily
             valid_daily = {}
             latest_allowed = min(
                 period_end, today - timedelta(days=1)
             )
 
-            for row in received_daily:
+            for row in cached_daily.values():
                 if not isinstance(row, dict):
                     continue
 
@@ -407,7 +454,10 @@ class NibaCoordinator(DataUpdateCoordinator):
             ]
             self._last_daily = daily_consumption
 
-            if daily_response_received:
+            if retained_cache:
+                daily_source = "cache_persistente"
+                daily_status = "respuesta_vacia_cache"
+            elif daily_response_received:
                 daily_source = "api"
                 daily_status = (
                     "datos_recibidos" if daily_consumption else "sin_curvas"
@@ -589,7 +639,20 @@ class NibaCoordinator(DataUpdateCoordinator):
                 len(bills),
             )
 
+            # Commit before publishing: failed saves do not pretend to preserve history.
+            candidate = CycleHistory(self._history.data)
+            candidate.update(history_supply, period_start, period_end, today,
+                             daily_consumption, calculated, safe_contract(calculation_contract))
+            await self._complete_previous_cycle(candidate, history_supply, cups)
+            if candidate.data != self._history.data:
+                try:
+                    await self._history_store.async_save(deepcopy(candidate.data))
+                except Exception:
+                    raise UpdateFailed("No se pudo guardar el historial local de Niba") from None
+                self._history = candidate
+
             return {
+                "cycle_history": self._history.summary(history_supply, bills),
                 "contract": self.contract,
                 "contracts_v2": contracts_v2,
                 "cups_info": cups_info,

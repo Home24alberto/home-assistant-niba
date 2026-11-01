@@ -232,6 +232,15 @@ def estimate_invoice(daily, start, end, today, tariff, contract):
     closed = min(end, today - timedelta(days=1))
     totals = {b: D(0) for b in BANDS}
     exports = D(0)
+    # Zero accrued closed days is not a statement of zero real-time consumption.
+    if today == start:
+        result.update({"estado": "inicio_ciclo_sin_dias_cerrados",
+                       "estado_prevision": "muestra_insuficiente", "dias_valorados": 0,
+                       "dias_pendientes_curvas": 0, "hasta_fecha": None,
+                       "consumo_kwh": 0.0, "excedentes_kwh": 0.0,
+                       "consumo_por_periodo_kwh": {b: 0.0 for b in BANDS},
+                       "acumulado": calculate(totals, exports, 0, tariff)})
+        return result
     valid = {}
     day = start
     stopped = "sin_curvas"

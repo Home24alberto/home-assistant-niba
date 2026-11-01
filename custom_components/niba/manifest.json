@@ -1,6 +1,6 @@
 {
   "domain": "niba",
-  "name": "Niba Energía",
+  "name": "Niba Energ\u00eda",
   "codeowners": [
     "@Home24alberto"
   ],
@@ -13,5 +13,5 @@
     "pypdf==6.10.0"
   ],
   "single_config_entry": true,
-  "version": "2.1.0"
+  "version": "2.1.1"
 }

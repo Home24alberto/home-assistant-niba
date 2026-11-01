@@ -909,6 +909,27 @@ async def async_setup_entry(hass, entry, async_add_entities):
         state_class=MEASUREMENT,
     )
 
+    # Separate archive entities: existing current-period IDs remain unchanged.
+    def history(c):
+        return block(c, "cycle_history")
+
+    def last_close(c):
+        return mapping(history(c).get("ultimo_cierre"))
+
+    field("Niba Ciclos guardados", "niba_saved_cycles", history, "ciclos_guardados",
+          attributes_fn=lambda c: history(c))
+    field("Niba Ultimo cierre calculado", "niba_last_close_calculated", last_close,
+          "total_calculado_eur", unit=CURRENCY_EURO, device_class=MONEY,
+          attributes_fn=last_close)
+    field("Niba Ultimo cierre facturado", "niba_last_close_billed", last_close,
+          "total_facturado_eur", unit=CURRENCY_EURO, device_class=MONEY,
+          attributes_fn=last_close)
+    field("Niba Diferencia ultimo cierre", "niba_last_close_difference", last_close,
+          "diferencia_eur", unit=CURRENCY_EURO, device_class=MONEY,
+          attributes_fn=last_close)
+    field("Niba Estado ultimo cierre", "niba_last_close_status", last_close,
+          "estado_comparacion", attributes_fn=last_close)
+
     # Totals use new unique IDs: historical energy sensors never become bill totals.
     for name, uid, source, key in (
         ("Niba Factura acumulada calculada", "niba_invoice_accrued", accrued, "total_eur"),
